@@ -232,3 +232,80 @@ where
         )),
     }
 }
+
+fn fn_f64_rad_to_num<'text_ptr, F>(
+    stack: &mut Vec<CalcResult>,
+    units: &Units,
+    action: F,
+) -> Result<(), EvalErr>
+where
+    F: Fn(f64) -> f64,
+{
+    let param = &stack[stack.len() - 1];
+    match &param.typ {
+        CalcResultType::Quantity(num, unit) if unit.is(UnitType::Angle) => {
+            let rad_unit = UnitOutput::new_rad(units);
+            let rad = UnitOutput::convert(unit, &rad_unit, num)
+                .ok_or(EvalErr::new2("Could not convert to rad".to_owned(), param))?;
+            if let Some(result) = rad
+                .to_f64()
+                .map(|it| action(it))
+                .and_then(|it| Decimal::from_f64(it))
+            {
+                let token_index = param.get_index_into_tokens();
+                stack.pop();
+                stack.push(CalcResult::new(CalcResultType::Number(result), token_index));
+                Ok(())
+            } else {
+                Err(EvalErr::new2(
+                    "Param or result could not be represented as f64".to_owned(),
+                    param,
+                ))
+            }
+        }
+        _ => Err(EvalErr::new2(
+            "Only numbers are supported currently".to_owned(),
+            param,
+        )),
+    }
+}
+
+fn fn_f64_num_to_rad<'text_ptr, F>(
+    stack: &mut Vec<CalcResult>,
+    action: F,
+    units: &Units,
+) -> Result<(), EvalErr>
+where
+    F: Fn(f64) -> f64,
+{
+    let param = &stack[stack.len() - 1];
+    match &param.typ {
+        CalcResultType::Number(num) => {
+            if num > &Decimal::one() || num < &Decimal::one().neg() {
+                return Err(EvalErr::new2("".to_owned(), param));
+            }
+            if let Some(result) = num
+                .to_f64()
+                .map(|it| action(it))
+                .and_then(|it| Decimal::from_f64(it))
+            {
+                let token_index = param.get_index_into_tokens();
+                stack.pop();
+                stack.push(CalcResult::new(
+                    CalcResultType::Quantity(result, UnitOutput::new_rad(units)),
+                    token_index,
+                ));
+                Ok(())
+            } else {
+                Err(EvalErr::new2(
+                    "Param or result could not be represented as f64".to_owned(),
+                    param,
+                ))
+            }
+        }
+        _ => Err(EvalErr::new2(
+            "Only numbers are supported currently".to_owned(),
+            param,
+        )),
+    }
+}
