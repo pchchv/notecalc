@@ -1,3 +1,12 @@
+use crate::calc::{add_op, CalcResult, CalcResultType, EvalErr};
+use crate::token_parser::{DECIMAL_E, DECIMAL_PI};
+use crate::units::consts::UnitType;
+use crate::units::units::{UnitOutput, Units};
+use rust_decimal::prelude::*;
+use std::ops::Neg;
+use strum::IntoEnumIterator;
+use strum_macros::EnumIter;
+
 #[derive(PartialEq, Eq, Clone, Copy, Debug, EnumIter)]
 pub enum FnType {
     UserDefined(usize),
@@ -306,6 +315,69 @@ where
         _ => Err(EvalErr::new2(
             "Only numbers are supported currently".to_owned(),
             param,
+        )),
+    }
+}
+
+fn fn_single_param_decimal<'text_ptr, F>(
+    stack: &mut Vec<CalcResult>,
+    action: F,
+) -> Result<(), EvalErr>
+where
+    F: Fn(&Decimal) -> Decimal,
+{
+    let param = &stack[stack.len() - 1];
+    match &param.typ {
+        CalcResultType::Number(num) => {
+            let result = action(num);
+            let token_index = param.get_index_into_tokens();
+            stack.pop();
+            stack.push(CalcResult::new(CalcResultType::Number(result), token_index));
+            Ok(())
+        }
+        _ => Err(EvalErr::new2(
+            "Only numbers are supported currently".to_owned(),
+            param,
+        )),
+    }
+}
+
+fn fn_nth<'text_ptr>(stack: &mut Vec<CalcResult>) -> Result<(), EvalErr> {
+    let index_token = &stack[stack.len() - 1];
+    let mat_token = &stack[stack.len() - 2];
+    match (&index_token.typ, &mat_token.typ) {
+        (CalcResultType::Number(n), CalcResultType::Matrix(mat)) => {
+            if let Some(index) = n.to_u32() {
+                if mat.col_count < (index + 1) as usize {
+                    Err(EvalErr::new(
+                        "Index is out of range".to_owned(),
+                        index_token.get_index_into_tokens(),
+                    ))
+                } else {
+                    let result = mat.cell(0, index as usize).clone();
+                    stack.truncate(stack.len() - 2);
+                    stack.push(result);
+                    Ok(())
+                }
+            } else {
+                Err(EvalErr::new(
+                    "Index must be zero or a positive integer".to_owned(),
+                    index_token.get_index_into_tokens(),
+                ))
+            }
+        }
+        (CalcResultType::Number(_), _) => Err(EvalErr::new(
+            "Second param must be a Matrix".to_owned(),
+            mat_token.get_index_into_tokens(),
+        )),
+        (_, CalcResultType::Matrix(_)) => Err(EvalErr::new(
+            "First param must be zero or a positive integer".to_owned(),
+            index_token.get_index_into_tokens(),
+        )),
+        _ => Err(EvalErr::new(
+            "First param must be zero or a positive integer and Second param must be a Matrix"
+                .to_owned(),
+            index_token.get_index_into_tokens(),
         )),
     }
 }
