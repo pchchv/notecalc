@@ -404,3 +404,21 @@ fn fn_sum(stack: &mut Vec<CalcResult>) -> Result<(), EvalErr> {
         _ => Err(EvalErr::new2("Param must be a matrix".to_owned(), param)),
     }
 }
+
+fn fn_transpose(stack: &mut Vec<CalcResult>) -> Result<(), EvalErr> {
+    let param = &stack[stack.len() - 1];
+    let index_into_tokens = param.get_index_into_tokens();
+    if let Some(transposed) = match &param.typ {
+        CalcResultType::Matrix(mat) => {
+            let t = CalcResultType::Matrix(mat.transposed());
+            Some(t)
+        }
+        _ => None,
+    } {
+        stack.truncate(stack.len() - 1);
+        stack.push(CalcResult::new(transposed, index_into_tokens));
+        Ok(())
+    } else {
+        Err(EvalErr::new2("Param must be a matrix".to_owned(), param))
+    }
+}
