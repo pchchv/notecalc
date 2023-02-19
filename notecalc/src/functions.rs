@@ -113,3 +113,16 @@ impl FnType {
         }
     }
 }
+
+fn fn_const<'text_ptr>(
+    stack: &mut Vec<CalcResult>,
+    token_index: usize,
+    const_value: Decimal,
+) -> Result<(), EvalErr> {
+    stack.push(CalcResult::new(
+        CalcResultType::Number(const_value),
+        token_index,
+    ));
+
+    Ok(())
+}
