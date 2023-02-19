@@ -152,3 +152,83 @@ where
         action(stack)
     };
 }
+
+fn fn_single_param_f64<'text_ptr, F>(stack: &mut Vec<CalcResult>, action: F) -> Result<(), EvalErr>
+where
+    F: Fn(f64) -> f64,
+{
+    let param = &stack[stack.len() - 1];
+    match &param.typ {
+        CalcResultType::Number(num) => {
+            if let Some(result) = num
+                .to_f64()
+                .map(|numf| action(numf))
+                .and_then(|ln_result| Decimal::from_f64(ln_result))
+            {
+                let token_index = param.get_index_into_tokens();
+                stack.pop();
+                stack.push(CalcResult::new(CalcResultType::Number(result), token_index));
+                Ok(())
+            } else {
+                Err(EvalErr::new2(
+                    "Number cannot be represented as f64".to_owned(),
+                    param,
+                ))
+            }
+        }
+        _ => Err(EvalErr::new2(
+            "Only numbers are supported currently".to_owned(),
+            param,
+        )),
+    }
+}
+
+fn fn_double_param_f64<'text_ptr, F>(
+    stack: &mut Vec<CalcResult>,
+    fn_token_index: usize,
+    action: F,
+) -> Result<(), EvalErr>
+where
+    F: Fn(f64, f64) -> f64,
+{
+    let first_param = &stack[stack.len() - 2];
+    let second_param = &stack[stack.len() - 1];
+    match (&first_param.typ, &second_param.typ) {
+        (CalcResultType::Number(p1_dec), CalcResultType::Number(p2_dec)) => {
+            let p1_f64 = p1_dec.to_f64();
+            let p2_f64 = p2_dec.to_f64();
+            if p1_f64.is_some() && p2_f64.is_some() {
+                if let Some(result) = Decimal::from_f64(action(p1_f64.unwrap(), p2_f64.unwrap())) {
+                    let token_index = first_param.get_index_into_tokens();
+                    stack.pop();
+                    stack.pop();
+                    stack.push(CalcResult::new(CalcResultType::Number(result), token_index));
+                    Ok(())
+                } else {
+                    Err(EvalErr::new(
+                        "The result cannot be converted from f64 to Decimal".to_owned(),
+                        fn_token_index,
+                    ))
+                }
+            } else if p1_f64.is_none() {
+                // TODO: format!
+                Err(EvalErr::new2(
+                    "The first arg could not be represented as f64".to_owned(),
+                    first_param,
+                ))
+            } else {
+                // TODO: format!
+                Err(EvalErr::new2(
+                    "The second arg could not be represented as f64".to_owned(),
+                    second_param,
+                ))
+            }
+        }
+        _ => Err(EvalErr::new3(
+            "Only numbers are supported currently".to_owned(),
+            fn_token_index,
+            first_param,
+            second_param,
+        )),
+    }
+}
