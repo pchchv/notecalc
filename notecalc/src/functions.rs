@@ -136,7 +136,7 @@ fn fn_const<'text_ptr>(
     Ok(())
 }
 
-fn fn_arg_count_limited<F>(
+fn arg_count_limited<F>(
     expected_arg_count: usize,
     arg_count: usize,
     stack: &mut Vec<CalcResult>,
@@ -162,7 +162,7 @@ where
     };
 }
 
-fn fn_single_param_f64<'text_ptr, F>(stack: &mut Vec<CalcResult>, action: F) -> Result<(), EvalErr>
+fn single_param_f64<'text_ptr, F>(stack: &mut Vec<CalcResult>, action: F) -> Result<(), EvalErr>
 where
     F: Fn(f64) -> f64,
 {
@@ -192,7 +192,7 @@ where
     }
 }
 
-fn fn_double_param_f64<'text_ptr, F>(
+fn double_param_f64<'text_ptr, F>(
     stack: &mut Vec<CalcResult>,
     fn_token_index: usize,
     action: F,
@@ -242,7 +242,7 @@ where
     }
 }
 
-fn fn_f64_rad_to_num<'text_ptr, F>(
+fn f64_rad_to_num<'text_ptr, F>(
     stack: &mut Vec<CalcResult>,
     units: &Units,
     action: F,
@@ -279,7 +279,7 @@ where
     }
 }
 
-fn fn_f64_num_to_rad<'text_ptr, F>(
+fn f64_num_to_rad<'text_ptr, F>(
     stack: &mut Vec<CalcResult>,
     action: F,
     units: &Units,
@@ -319,10 +319,7 @@ where
     }
 }
 
-fn fn_single_param_decimal<'text_ptr, F>(
-    stack: &mut Vec<CalcResult>,
-    action: F,
-) -> Result<(), EvalErr>
+fn single_param_decimal<'text_ptr, F>(stack: &mut Vec<CalcResult>, action: F) -> Result<(), EvalErr>
 where
     F: Fn(&Decimal) -> Decimal,
 {
@@ -342,7 +339,7 @@ where
     }
 }
 
-fn fn_nth<'text_ptr>(stack: &mut Vec<CalcResult>) -> Result<(), EvalErr> {
+fn nth<'text_ptr>(stack: &mut Vec<CalcResult>) -> Result<(), EvalErr> {
     let index_token = &stack[stack.len() - 1];
     let mat_token = &stack[stack.len() - 2];
     match (&index_token.typ, &mat_token.typ) {
@@ -382,7 +379,7 @@ fn fn_nth<'text_ptr>(stack: &mut Vec<CalcResult>) -> Result<(), EvalErr> {
     }
 }
 
-fn fn_sum(stack: &mut Vec<CalcResult>) -> Result<(), EvalErr> {
+fn sum(stack: &mut Vec<CalcResult>) -> Result<(), EvalErr> {
     let param = &stack[stack.len() - 1];
     match &param.typ {
         CalcResultType::Matrix(mat) => {
@@ -405,7 +402,7 @@ fn fn_sum(stack: &mut Vec<CalcResult>) -> Result<(), EvalErr> {
     }
 }
 
-fn fn_transpose(stack: &mut Vec<CalcResult>) -> Result<(), EvalErr> {
+fn transpose(stack: &mut Vec<CalcResult>) -> Result<(), EvalErr> {
     let param = &stack[stack.len() - 1];
     let index_into_tokens = param.get_index_into_tokens();
     if let Some(transposed) = match &param.typ {
