@@ -381,3 +381,26 @@ fn fn_nth<'text_ptr>(stack: &mut Vec<CalcResult>) -> Result<(), EvalErr> {
         )),
     }
 }
+
+fn fn_sum(stack: &mut Vec<CalcResult>) -> Result<(), EvalErr> {
+    let param = &stack[stack.len() - 1];
+    match &param.typ {
+        CalcResultType::Matrix(mat) => {
+            let mut sum = mat.cells[0].clone();
+            for cell in mat.cells.iter().skip(1) {
+                if let Some(result) = add_op(&sum, cell) {
+                    sum = result;
+                } else {
+                    return Err(EvalErr::new(
+                        format!("'{:?}' + '{:?}' failed", &sum, &cell),
+                        cell.get_index_into_tokens(),
+                    ));
+                }
+            }
+            stack.truncate(stack.len() - 1);
+            stack.push(sum);
+            Ok(())
+        }
+        _ => Err(EvalErr::new2("Param must be a matrix".to_owned(), param)),
+    }
+}
