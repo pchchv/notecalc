@@ -126,3 +126,29 @@ fn fn_const<'text_ptr>(
 
     Ok(())
 }
+
+fn fn_arg_count_limited<F>(
+    expected_arg_count: usize,
+    arg_count: usize,
+    stack: &mut Vec<CalcResult>,
+    fn_token_index: usize,
+    action: F,
+) -> Result<(), EvalErr>
+where
+    F: Fn(&mut Vec<CalcResult>) -> Result<(), EvalErr>,
+{
+    let arg_count = arg_count.min(stack.len());
+
+    return if expected_arg_count != arg_count {
+        if arg_count > 0 {
+            Err(EvalErr::new(
+                "Illegal argument".to_owned(),
+                stack[stack.len() - 1].get_index_into_tokens(),
+            ))
+        } else {
+            Err(EvalErr::new("Illegal argument".to_owned(), fn_token_index))
+        }
+    } else {
+        action(stack)
+    };
+}
