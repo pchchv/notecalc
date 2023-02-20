@@ -11,6 +11,7 @@ use crate::{
     MAX_TOKEN_COUNT_PER_LINE, SUM_VARIABLE_INDEX, VARIABLE_ARR_SIZE,
 };
 use rust_decimal::prelude::*;
+use std::ops::{BitXor, Neg, Not, Shl, Shr};
 use tinyvec::ArrayVec;
 
 const DECIMAL_100: Decimal = Decimal::from_parts(100, 0, 0, false, 0);
@@ -1111,6 +1112,53 @@ fn unary_minus_op(lhs: &CalcResult) -> Option<CalcResult> {
         }
         _ => None,
         CalcResultType::Matrix(mat) => CalcResultType::Matrix(mat.neg()),
+    }
+}
+
+fn bitwise_not(lhs: &CalcResult) -> Option<CalcResult> {
+    match &lhs.typ {
+        CalcResultType::Number(lhs_num) => {
+            // 0b01 and 0b10
+            let lhs_num = lhs_num.to_u64()?;
+            Some(CalcResult::new(
+                CalcResultType::Number(dec(lhs_num.not())),
+                lhs.index_into_tokens,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn bitwise_xor_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
+    match (&lhs.typ, &rhs.typ) {
+        //////////////
+        // 12 and x
+        //////////////
+        (CalcResultType::Number(lhs), CalcResultType::Number(rhs)) => {
+            // 0b01 and 0b10
+            let lhs = lhs.to_u64()?;
+            let rhs = rhs.to_u64()?;
+            Some(CalcResult::new(
+                CalcResultType::Number(dec(lhs.bitxor(rhs))),
+                0,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn bitwise_or_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
+    match (&lhs.typ, &rhs.typ) {
+        //////////////
+        // 12 and x
+        //////////////
+        (CalcResultType::Number(lhs), CalcResultType::Number(rhs)) => {
+            // 0b01 and 0b10
+            let lhs = lhs.to_u64()?;
+            let rhs = rhs.to_u64()?;
+            Some(CalcResult::new(CalcResultType::Number(dec(lhs | rhs)), 0))
+        }
+        _ => None,
     }
 }
 
