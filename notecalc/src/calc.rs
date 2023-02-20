@@ -1150,6 +1150,66 @@ fn bitwise_shift_left(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> 
     }
 }
 
+fn perc_num_is_xperc_on_what(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
+    // 'lhs' is 'rhs' on what
+    // 41 is 17% on what
+    match (&lhs.typ, &rhs.typ) {
+        (CalcResultType::Number(y), CalcResultType::Percentage(p)) => {
+            let x = y
+                .checked_mul(&DECIMAL_100)?
+                .checked_div(&p.checked_add(&DECIMAL_100)?)?;
+            Some(CalcResult::new(CalcResultType::Number(x), 0))
+        }
+        _ => None,
+    }
+}
+
+fn perc_num_is_xperc_off_what(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
+    // 'lhs' is 'rhs' off what
+    // 41 is 17% off what
+    // x = (y*100)/(100-p)
+    match (&lhs.typ, &rhs.typ) {
+        (CalcResultType::Number(y), CalcResultType::Percentage(p)) => {
+            let x = y
+                .checked_mul(&DECIMAL_100)?
+                .checked_div(&DECIMAL_100.checked_sub(&p)?)?;
+            Some(CalcResult::new(CalcResultType::Number(x), 0))
+        }
+        _ => None,
+    }
+}
+
+fn perc_num_is_what_perc_on_num(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
+    // lhs is what % on rhs
+    // 41 is what % on 35
+    match (&lhs.typ, &rhs.typ) {
+        (CalcResultType::Number(y), CalcResultType::Number(x)) => {
+            let p = y
+                .checked_mul(&DECIMAL_100)?
+                .checked_div(x)?
+                .checked_sub(&DECIMAL_100)?;
+            Some(CalcResult::new(CalcResultType::Percentage(p), 0))
+        }
+        _ => None,
+    }
+}
+
+fn perc_num_is_what_perc_off_num(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
+    // lhs is what % off rhs
+    // 35 is what % off 41
+    match (&lhs.typ, &rhs.typ) {
+        (CalcResultType::Number(y), CalcResultType::Number(x)) => {
+            let p = y
+                .checked_mul(&DECIMAL_100)?
+                .checked_div(x)?
+                .checked_sub(&DECIMAL_100)?
+                .neg();
+            Some(CalcResult::new(CalcResultType::Percentage(p), 0))
+        }
+        _ => None,
+    }
+}
+
 fn apply_unit_to_num(
     num: &Decimal,
     target_unit: &UnitOutput,
