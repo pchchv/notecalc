@@ -1115,6 +1115,116 @@ fn unary_minus_op(lhs: &CalcResult) -> Option<CalcResult> {
     }
 }
 
+fn apply_operation<'text_ptr>(
+    stack: &mut Vec<CalcResult>,
+    op: &OperatorTokenType,
+    op_token_index: usize,
+    units: &Units,
+    lock_stack: &mut ArrayVec<[u16; 64]>,
+) -> Result<(), EvalErr> {
+    let succeed = match &op {
+        OperatorTokenType::Mult
+        | OperatorTokenType::Div
+        | OperatorTokenType::Add
+        | OperatorTokenType::Sub
+        | OperatorTokenType::BinAnd
+        | OperatorTokenType::BinOr
+        | OperatorTokenType::BinXor
+        | OperatorTokenType::Pow
+        | OperatorTokenType::ShiftLeft
+        | OperatorTokenType::ShiftRight
+        | OperatorTokenType::Percentage_Find_Base_From_Result_Increase_X
+        | OperatorTokenType::Percentage_Find_Base_From_X_Icrease_Result
+        | OperatorTokenType::Percentage_Find_Base_From_Icrease_X_Result
+        | OperatorTokenType::Percentage_Find_Incr_Rate_From_Result_X_Base
+        | OperatorTokenType::Percentage_Find_Base_From_Result_Decrease_X
+        | OperatorTokenType::Percentage_Find_Base_From_X_Decrease_Result
+        | OperatorTokenType::Percentage_Find_Base_From_Decrease_X_Result
+        | OperatorTokenType::Percentage_Find_Decr_Rate_From_Result_X_Base
+        | OperatorTokenType::Percentage_Find_Rate_From_Result_Base
+        | OperatorTokenType::Percentage_Find_Base_From_Result_Rate
+        | OperatorTokenType::UnitConverter => {
+            if stack.len() > 1 {
+                let (lhs, rhs) = (&stack[stack.len() - 2], &stack[stack.len() - 1]);
+                if let Some(result) = binary_operation(op, lhs, rhs, units) {
+                    stack.truncate(stack.len() - 2);
+                    stack.push(result);
+                    Ok(())
+                } else {
+                    Err(EvalErr::new("Op failed".to_owned(), op_token_index))
+                }
+            } else {
+                Err(EvalErr::new("Not enugh operand".to_owned(), 0))
+            }
+        }
+        OperatorTokenType::UnaryMinus
+        | OperatorTokenType::UnaryPlus
+        | OperatorTokenType::Perc
+        | OperatorTokenType::BinNot => {
+            let maybe_top = stack.last();
+            let result = maybe_top.and_then(|top| unary_operation(&op, top, op_token_index));
+            debug_print(&format!(
+                "calc> {:?} {:?} = {:?}",
+                &op,
+                &maybe_top.as_ref().map(|it| &it.typ),
+                &result
+            ));
+            if let Some(result) = result {
+                stack.pop();
+                stack.push(result);
+                Ok(())
+            } else {
+                Err(EvalErr::new("??".to_owned(), 0))
+            }
+        }
+        OperatorTokenType::Matrix {
+            row_count,
+            col_count,
+        } => {
+            let lock_offset = lock_stack.pop().expect("must");
+            let arg_count = row_count * col_count;
+            if stack.len() - lock_offset as usize >= arg_count {
+                let matrix_args = stack.drain(stack.len() - arg_count..).collect::<Vec<_>>();
+                stack.push(CalcResult::new(
+                    CalcResultType::Matrix(MatrixData::new(matrix_args, *row_count, *col_count)),
+                    op_token_index,
+                ));
+                debug_print("calc> Matrix");
+                Ok(())
+            } else {
+                Err(EvalErr::new(
+                    "Not enough argument for matrix creation".to_owned(),
+                    op_token_index,
+                ))
+            }
+        }
+        OperatorTokenType::Fn { arg_count, typ } => {
+            debug_print(&format!("calc> call Fn {:?}", typ));
+            typ.execute(*arg_count, stack, op_token_index, units)
+        }
+        OperatorTokenType::Semicolon | OperatorTokenType::Comma => {
+            // ignore
+            Ok(())
+        }
+        OperatorTokenType::Assign | OperatorTokenType::StartLock => {
+            panic!("handled in the main loop above")
+        }
+        OperatorTokenType::ParenOpen
+        | OperatorTokenType::ParenClose
+        | OperatorTokenType::BracketOpen
+        | OperatorTokenType::BracketClose => {
+            // this branch was executed during fuzz testing, don't panic here
+            // check test_panic_fuzz_3
+            return Err(EvalErr::new(String::new(), op_token_index));
+        }
+        OperatorTokenType::PercentageIs => {
+            // ignore
+            Ok(())
+        }
+    };
+    return succeed;
+}
+
 fn binary_operation(
     op: &OperatorTokenType,
     lhs: &CalcResult,
@@ -1458,4 +1568,3 @@ pub fn dec<T: Into<Decimal>>(num: T) -> Decimal {
 fn percentage_of(this: &Decimal, base: &Decimal) -> Option<Decimal> {
     base.checked_div(&DECIMAL_100)?.checked_mul(this)
 }
-
