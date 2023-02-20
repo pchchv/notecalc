@@ -494,3 +494,47 @@ impl TokenParser {
             *longest_match_index = var_index;
         }
     }
+
+    #[inline]
+    fn try_extract_string_literal<'text_ptr>(
+        str: &[char],
+        allocator: &'text_ptr Bump,
+    ) -> Token<'text_ptr> {
+        tracy_span("try_extract_string_literal", file!(), line!());
+        let mut i = 0;
+        for ch in str {
+            if "=%/+-*^()[],".chars().any(|it| it == *ch) || ch.is_ascii_whitespace() {
+                break;
+            }
+            // it means somwewhere we passed an invalid slice
+            debug_assert!(*ch as u8 != 0);
+            i += 1;
+        }
+        let result = if i > 0 {
+            // alphabetical literal
+            Token {
+                typ: TokenType::StringLiteral,
+                ptr: allocator.alloc_slice_fill_iter(str.iter().map(|it| *it).take(i)),
+                has_error: false,
+            }
+        } else {
+            for ch in &str[0..] {
+                if !ch.is_ascii_whitespace() {
+                    break;
+                }
+                i += 1;
+            }
+            if i > 0 {
+                // whitespace
+                Token {
+                    typ: TokenType::StringLiteral,
+                    // ptr: &str[0..i],
+                    ptr: allocator.alloc_slice_fill_iter(str.iter().map(|it| *it).take(i)),
+                    has_error: false,
+                }
+            } else {
+                panic!("cannot happen")
+            }
+        };
+        return result;
+    }
