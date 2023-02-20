@@ -1073,6 +1073,46 @@ pub fn add_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
     }
 }
 
+fn bitwise_and_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
+    match (&lhs.typ, &rhs.typ) {
+        // 12 and x
+        (CalcResultType::Number(lhs), CalcResultType::Number(rhs)) => {
+            // 0b01 and 0b10
+            let lhs = lhs.to_u64()?;
+            let rhs = rhs.to_u64()?;
+            Some(CalcResult::new(CalcResultType::Number(dec(lhs & rhs)), 0))
+        }
+        _ => None,
+    }
+}
+
+fn unary_minus_op(lhs: &CalcResult) -> Option<CalcResult> {
+    match &lhs.typ {
+        CalcResultType::Number(lhs_num) => {
+            // -12
+            Some(CalcResult::new(
+                CalcResultType::Number(lhs_num.neg()),
+                lhs.index_into_tokens,
+            ))
+        }
+        CalcResultType::Quantity(lhs_num, unit) => {
+            // -12km
+            Some(CalcResult::new(
+                CalcResultType::Quantity(lhs_num.neg(), unit.clone()),
+                lhs.index_into_tokens,
+            ))
+        }
+        CalcResultType::Percentage(lhs_num) => {
+            // -50%
+            Some(CalcResult::new(
+                CalcResultType::Percentage(lhs_num.neg()),
+                lhs.index_into_tokens,
+            ))
+        }
+        _ => None,
+        CalcResultType::Matrix(mat) => CalcResultType::Matrix(mat.neg()),
+    }
+}
 fn apply_unit_to_num(
     num: &Decimal,
     target_unit: &UnitOutput,
