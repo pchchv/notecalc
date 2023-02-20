@@ -34,6 +34,33 @@ pub enum Assoc {
     Right,
 }
 
+#[derive(Debug, Clone)]
+pub struct Token<'a> {
+    pub ptr: &'a [char],
+    pub typ: TokenType,
+    pub has_error: bool,
+}
+
+impl<'text_ptr> Token<'text_ptr> {
+    pub fn is_number(&self) -> bool {
+        matches!(self.typ, TokenType::NumberLiteral(..))
+    }
+
+    pub fn is_string(&self) -> bool {
+        matches!(self.typ, TokenType::StringLiteral)
+    }
+
+    pub fn has_error(&self) -> bool {
+        self.has_error
+    }
+
+    pub fn set_token_error_flag_by_index(index: usize, tokens: &mut [Token]) {
+        if let Some(t) = tokens.get_mut(index) {
+            t.has_error = true
+        }
+    }
+}
+
 #[allow(non_camel_case_types)]
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub enum OperatorTokenType {
