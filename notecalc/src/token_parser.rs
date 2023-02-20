@@ -338,3 +338,159 @@ impl TokenParser {
         return result;
     }
 
+    #[inline]
+    fn try_extract_comment<'text_ptr>(
+        line: &[char],
+        allocator: &'text_ptr Bump,
+    ) -> Option<Token<'text_ptr>> {
+        return if line.starts_with(&['/', '/']) {
+            Some(Token {
+                typ: TokenType::StringLiteral,
+                ptr: allocator.alloc_slice_fill_iter(line.iter().map(|it| *it)),
+                has_error: false,
+            })
+        } else {
+            None
+        };
+    }
+
+    #[inline]
+    fn try_extract_variable_name<'text_ptr>(
+        line: &[char],
+        vars: &Variables,
+        parsed_row_index: usize,
+        allocator: &'text_ptr Bump,
+        prev_was_lineref: bool,
+        function_param_count: usize,
+        func_defs: &FunctionDefinitions<'text_ptr>,
+    ) -> Option<Token<'text_ptr>> {
+        tracy_span("try_extract_variable_name", file!(), line!());
+        if line.starts_with(&['s', 'u', 'm'])
+            && line
+                .get(3)
+                .map(|it| !it.is_alphanumeric() && *it != '_' && *it != '(')
+                .unwrap_or(true)
+        {
+            return Some(Token {
+                typ: TokenType::Variable {
+                    var_index: SUM_VARIABLE_INDEX,
+                },
+                ptr: allocator.alloc_slice_fill_iter(line.iter().map(|it| *it).take(3)),
+                has_error: false,
+            });
+        }
+
+        let mut longest_match_index = 0;
+        let mut longest_match = 0;
+        // first try to find the var in 'vars' so parameters can be shadowed
+        'outer: for (var_index, var) in vars[0..parsed_row_index].iter().enumerate().rev() {
+            // avoid variable declarations that are in a function we are not part of
+            for investigated_line_i in (0..=var_index).rev() {
+                if let Some(fd) = func_defs[investigated_line_i].as_ref() {
+                    let investigated_line_is_part_of_that_func =
+                        var_index <= fd.last_row_index.as_usize();
+                    let parsed_line_is_not_part_of_that_func =
+                        parsed_row_index > fd.last_row_index.as_usize();
+                    if investigated_line_is_part_of_that_func {
+                        if parsed_line_is_not_part_of_that_func {
+                            // if this line belongs to a function we are not part of
+                            continue 'outer;
+                        } else {
+                            // first check the lines inside the function
+                            // then check the parameters
+                            // then the lines above the function
+                            if investigated_line_i == var_index {
+                                for (var_index, var) in vars[FIRST_FUNC_PARAM_VAR_INDEX
+                                    ..FIRST_FUNC_PARAM_VAR_INDEX + function_param_count]
+                                    .iter()
+                                    .enumerate()
+                                {
+                                    TokenParser::find_variable_match(
+                                        line,
+                                        &mut longest_match_index,
+                                        &mut longest_match,
+                                        FIRST_FUNC_PARAM_VAR_INDEX + var_index,
+                                        var,
+                                    )
+                                }
+                                continue 'outer;
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+
+            TokenParser::find_variable_match(
+                line,
+                &mut longest_match_index,
+                &mut longest_match,
+                var_index,
+                var,
+            );
+        }
+
+        let result = if longest_match > 0 {
+            let is_line_ref = longest_match > 2 && line[0] == '&' && line[1] == '[';
+            let typ = if is_line_ref {
+                if prev_was_lineref {
+                    return None;
+                } else {
+                    TokenType::LineReference {
+                        var_index: longest_match_index,
+                    }
+                }
+            } else {
+                TokenType::Variable {
+                    var_index: longest_match_index,
+                }
+            };
+            Some(Token {
+                typ,
+                ptr: allocator.alloc_slice_fill_iter(line.iter().map(|it| *it).take(longest_match)),
+                has_error: false,
+            })
+        } else {
+            None
+        };
+        return result;
+    }
+
+    fn find_variable_match(
+        line: &[char],
+        longest_match_index: &mut usize,
+        longest_match: &mut usize,
+        var_index: usize,
+        var: &Option<Variable>,
+    ) {
+        if var.is_none() {
+            return;
+        }
+        let var = var.as_ref().unwrap();
+
+        for (i, ch) in var.name.iter().enumerate() {
+            if i >= line.len() || line[i] != *ch {
+                return;
+            }
+        }
+        // if the next char is '(', it can't be a var name
+        if line
+            .get(var.name.len())
+            .map(|it| *it == '(')
+            .unwrap_or(false)
+        {
+            return;
+        }
+        // only full match allowed e.g. if there is variable 'b', it should not match "b0" as 'b' and '0'
+        let not_full_match = line
+            .get(var.name.len())
+            .map(|it| it.is_alphanumeric())
+            .unwrap_or(false);
+        if not_full_match {
+            return;
+        }
+        if var.name.len() > *longest_match {
+            *longest_match = var.name.len();
+            *longest_match_index = var_index;
+        }
+    }
