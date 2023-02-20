@@ -1115,6 +1115,99 @@ fn unary_minus_op(lhs: &CalcResult) -> Option<CalcResult> {
     }
 }
 
+fn binary_operation(
+    op: &OperatorTokenType,
+    lhs: &CalcResult,
+    rhs: &CalcResult,
+    units: &Units,
+) -> Option<CalcResult> {
+    let result = match &op {
+        OperatorTokenType::Mult => multiply_op(lhs, rhs),
+        OperatorTokenType::Div => divide_op(lhs, rhs),
+        OperatorTokenType::Add => add_op(lhs, rhs),
+        OperatorTokenType::Sub => sub_op(lhs, rhs),
+        OperatorTokenType::BinAnd => bitwise_and_op(lhs, rhs),
+        OperatorTokenType::BinOr => bitwise_or_op(lhs, rhs),
+        OperatorTokenType::BinXor => bitwise_xor_op(lhs, rhs),
+        OperatorTokenType::Pow => pow_op(lhs, rhs),
+        OperatorTokenType::ShiftLeft => bitwise_shift_left(lhs, rhs),
+        OperatorTokenType::ShiftRight => bitwise_shift_right(lhs, rhs),
+        OperatorTokenType::Percentage_Find_Base_From_Result_Increase_X => {
+            perc_num_is_xperc_on_what(lhs, rhs)
+        }
+        OperatorTokenType::Percentage_Find_Base_From_X_Icrease_Result => {
+            perc_num_is_xperc_on_what(rhs, lhs)
+        }
+        OperatorTokenType::Percentage_Find_Base_From_Icrease_X_Result => {
+            perc_num_is_xperc_on_what(rhs, lhs)
+        }
+        OperatorTokenType::Percentage_Find_Incr_Rate_From_Result_X_Base => {
+            perc_num_is_what_perc_on_num(lhs, rhs)
+        }
+        //
+        OperatorTokenType::Percentage_Find_Base_From_Result_Decrease_X => {
+            perc_num_is_xperc_off_what(lhs, rhs)
+        }
+        OperatorTokenType::Percentage_Find_Base_From_X_Decrease_Result => {
+            perc_num_is_xperc_off_what(rhs, lhs)
+        }
+        OperatorTokenType::Percentage_Find_Base_From_Decrease_X_Result => {
+            perc_num_is_xperc_off_what(rhs, lhs)
+        }
+        OperatorTokenType::Percentage_Find_Decr_Rate_From_Result_X_Base => {
+            perc_num_is_what_perc_off_num(lhs, rhs)
+        }
+        OperatorTokenType::Percentage_Find_Rate_From_Result_Base => {
+            percentage_find_rate_from_result_base(lhs, rhs)
+        }
+        OperatorTokenType::Percentage_Find_Base_From_Result_Rate => {
+            percentage_find_base_from_result_rate(lhs, rhs)
+        }
+        OperatorTokenType::UnitConverter => {
+            return match (&lhs.typ, &rhs.typ) {
+                (
+                    CalcResultType::Quantity(lhs_num, source_unit),
+                    CalcResultType::Unit(target_unit),
+                ) => {
+                    if source_unit.is_compatible(target_unit) {
+                        let converted_num = UnitOutput::convert(source_unit, target_unit, lhs_num)?;
+                        Some(CalcResult::new(
+                            CalcResultType::Quantity(converted_num, target_unit.clone()),
+                            0,
+                        ))
+                    } else {
+                        None
+                    }
+                }
+                (CalcResultType::Matrix(mat), CalcResultType::Unit(..)) => {
+                    let cells: Option<Vec<CalcResult>> = mat
+                        .cells
+                        .iter()
+                        .map(|cell| binary_operation(op, cell, rhs, units))
+                        .collect();
+                    cells.map(|it| {
+                        CalcResult::new(
+                            CalcResultType::Matrix(MatrixData::new(
+                                it,
+                                mat.row_count,
+                                mat.col_count,
+                            )),
+                            0,
+                        )
+                    })
+                }
+                _ => None,
+            };
+        }
+        _ => panic!(),
+    };
+    debug_print(&format!(
+        "calc====\n  {:?}\n  {:?}\n  {:?}\n  = {:?}",
+        &lhs.typ, op, &rhs.typ, &result
+    ));
+    result
+}
+
 fn percentage_operator(lhs: &CalcResult, op_token_index: usize) -> Option<CalcResult> {
     match &lhs.typ {
         CalcResultType::Number(lhs_num) => {
