@@ -263,7 +263,6 @@ pub fn evaluate_tokens<'text_ptr>(
                         })
                         .unwrap_or(false)
                     {
-                        // TODO clone
                         stack.push(CalcResult::new(
                             CalcResultType::Unit(target_unit.clone()),
                             token.index_into_tokens,
@@ -300,16 +299,13 @@ pub fn evaluate_tokens<'text_ptr>(
                     );
                 }
                 // fill variables from the stack
-                // TODO avoid copy
                 let mut local_vars = create_vars();
 
-                // don't clone sum
                 local_vars[0..SUM_VARIABLE_INDEX].clone_from_slice(&vars[0..SUM_VARIABLE_INDEX]);
                 local_vars[SUM_VARIABLE_INDEX + 1..VARIABLE_ARR_SIZE]
                     .clone_from_slice(&vars[SUM_VARIABLE_INDEX + 1..VARIABLE_ARR_SIZE]);
                 for i in (0..expected_arg_count).rev() {
                     local_vars[FIRST_FUNC_PARAM_VAR_INDEX + i] = Some(Variable {
-                        // TODO: absolutely not, it would mean an alloc in hot path
                         name: Box::from(fd.param_names[i]),
                         value: stack.pop().ok_or(()),
                     });
@@ -393,7 +389,6 @@ pub fn evaluate_tokens<'text_ptr>(
             }
             TokenType::StringLiteral | TokenType::Header => panic!(),
             TokenType::Variable { var_index } | TokenType::LineReference { var_index } => {
-                // TODO clone :(
                 match &vars[*var_index]
                     .as_ref()
                     .expect("var_index should be valid!")
@@ -440,7 +435,6 @@ pub fn evaluate_tokens<'text_ptr>(
                 there_was_unit_conversion,
                 there_was_operation: true,
                 assignment,
-                // nocheckin TODO: remove clone
                 result: stack[last_success_operation_index].clone(),
             }))
         }
@@ -454,6 +448,59 @@ pub fn evaluate_tokens<'text_ptr>(
 
     return (wrong_type_token_indices, result);
 }
+
+pub fn process_variable_assignment_or_line_ref<'a, 'b>(
+    result: &Result<Option<EvaluationResult>, EvalErr>,
+    vars: &mut Variables,
+    editor_y: usize,
+    editor_content: &EditorContent<LineData>,
+) {
+    if let Ok(Some(result)) = &result {
+        fn replace_or_insert_var(
+            vars: &mut Variables,
+            var_name: &[char],
+            result: CalcResult,
+            editor_y: usize,
+        ) {
+            if let Some(var) = &mut vars[editor_y] {
+                var.name = Box::from(var_name);
+                var.value = Ok(result);
+            } else {
+                vars[editor_y] = Some(Variable {
+                    name: Box::from(var_name),
+                    value: Ok(result),
+                });
+            };
+        }
+
+        if result.assignment {
+            let var_name = get_var_name_from_assignment(editor_y, editor_content);
+            if !var_name.is_empty() {
+                debug_print(&format!(
+                    "eval> assign {:?} at {} to {:?}",
+                    var_name, editor_y, &result.result
+                ));
+                replace_or_insert_var(vars, var_name, result.result.clone(), editor_y);
+            }
+        } else {
+            let line_data = editor_content.get_data(editor_y);
+            debug_assert!(line_data.line_id > 0);
+            let line_id = line_data.line_id;
+            let var_name: Vec<char> = format!("&[{}]", line_id).chars().collect();
+            replace_or_insert_var(vars, &var_name, result.result.clone(), editor_y);
+        }
+    } else if let Some(var) = &mut vars[editor_y] {
+        let line_data = editor_content.get_data(editor_y);
+        debug_assert!(line_data.line_id > 0);
+        let line_id = line_data.line_id;
+        let var_name: Vec<char> = format!("&[{}]", line_id).chars().collect();
+        var.name = Box::from(var_name);
+        var.value = Err(());
+    } else {
+        vars[editor_y] = None;
+    }
+}
+
 pub fn divide_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
     let result: Option<CalcResult> = match (&lhs.typ, &rhs.typ) {
         (CalcResultType::Unit(..), CalcResultType::Unit(..))
