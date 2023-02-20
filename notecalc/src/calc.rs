@@ -1,4 +1,5 @@
 use crate::matrix::MatrixData;
+use crate::token_parser::TokenType;
 use crate::units::units::UnitOutput;
 use rust_decimal::prelude::*;
 
@@ -57,6 +58,29 @@ impl CalcResult {
 
     pub fn zero() -> CalcResult {
         CalcResult::new(CalcResultType::Number(Decimal::zero()), 0)
+    }
+}
+
+#[derive(Debug)]
+pub struct EvaluationResult {
+    pub there_was_unit_conversion: bool,
+    pub there_was_operation: bool,
+    pub assignment: bool,
+    pub result: CalcResult,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShuntingYardResult {
+    pub typ: TokenType,
+    pub index_into_tokens: usize,
+}
+
+impl ShuntingYardResult {
+    pub fn new(typ: TokenType, index_into_tokens: usize) -> ShuntingYardResult {
+        ShuntingYardResult {
+            typ,
+            index_into_tokens,
+        }
     }
 }
 
