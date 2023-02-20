@@ -4,6 +4,7 @@ use crate::{
     tracy_span, FunctionDefinitions, Variable, Variables, FIRST_FUNC_PARAM_VAR_INDEX,
     SUM_VARIABLE_INDEX,
 };
+use bumpalo::Bump;
 use rust_decimal::prelude::*;
 
 pub const APPLY_UNIT_OP_PREC: usize = 5;
@@ -287,3 +288,53 @@ impl TokenParser {
             dst.push(parse_result);
         }
     }
+
+    #[inline]
+    fn try_extract_unit<'text_ptr>(
+        str: &[char],
+        unit: &Units,
+        can_be_unit: Option<UnitTokenType>,
+        can_be_unit_converter: bool,
+        allocator: &'text_ptr Bump,
+    ) -> Option<Token<'text_ptr>> {
+        tracy_span("try_extract_unit", file!(), line!());
+        if can_be_unit.is_none() || str[0].is_ascii_whitespace() {
+            return None;
+        }
+        let (unit, parsed_len) = unit.parse(str);
+        let result = if parsed_len == 0 {
+            None
+        } else {
+            // remove trailing spaces
+            let mut i = parsed_len;
+            while i > 0 && str[i - 1].is_ascii_whitespace() {
+                i -= 1;
+            }
+            let ptr = allocator.alloc_slice_fill_iter(str.iter().map(|it| *it).take(i));
+            if ptr == &['i', 'n'] && can_be_unit_converter {
+                // 'in' is always a UnitConverter, the shunting_yard will convert it to
+                // ApplyUnit or String if necessary.
+                // It is required "&[1] in", here, we don't know yet if 'in' is a converter or a unit
+                // for the referenced value
+                // However with 'can_be_unit_converter' we try to reduce its occurance
+                // as much as possible
+                Some(Token {
+                    typ: TokenType::Operator(OperatorTokenType::UnitConverter),
+                    ptr,
+                    has_error: false,
+                })
+            } else {
+                if let Some(can_be_unit) = can_be_unit {
+                    Some(Token {
+                        typ: TokenType::Unit(can_be_unit, unit),
+                        ptr,
+                        has_error: false,
+                    })
+                } else {
+                    panic!("impossible")
+                }
+            }
+        };
+        return result;
+    }
+
