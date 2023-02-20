@@ -230,3 +230,148 @@ pub fn divide_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
     };
 }
 
+pub fn multiply_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
+    let result = match (&lhs.typ, &rhs.typ) {
+        (CalcResultType::Unit(..), CalcResultType::Unit(..))
+        | (CalcResultType::Unit(..), CalcResultType::Number(..))
+        | (CalcResultType::Unit(..), CalcResultType::Quantity(..))
+        | (CalcResultType::Unit(..), CalcResultType::Percentage(..))
+        | (CalcResultType::Unit(..), CalcResultType::Matrix(..))
+        | (CalcResultType::Number(..), CalcResultType::Unit(..))
+        | (CalcResultType::Quantity(..), CalcResultType::Unit(..))
+        | (CalcResultType::Percentage(..), CalcResultType::Unit(..))
+        | (CalcResultType::Matrix(..), CalcResultType::Unit(..)) => None,
+        //////////////
+        // 12 * x
+        //////////////
+        (CalcResultType::Number(lhs), CalcResultType::Number(rhs)) => {
+            // 12 * 2
+            lhs.checked_mul(rhs)
+                .map(|num| CalcResult::new(CalcResultType::Number(num), 0))
+        }
+        (CalcResultType::Number(lhs), CalcResultType::Quantity(rhs, unit)) => {
+            // 12 * 2km
+            lhs.checked_mul(rhs)
+                .map(|num| CalcResult::new(CalcResultType::Quantity(num, unit.clone()), 0))
+        }
+        (CalcResultType::Number(lhs), CalcResultType::Percentage(rhs)) => {
+            // 100 * 50%
+            Some(CalcResult::new(
+                CalcResultType::Number(percentage_of(rhs, lhs)?),
+                0,
+            ))
+        }
+        (CalcResultType::Number(..), CalcResultType::Matrix(mat)) => mat.mult_scalar(lhs),
+        //////////////
+        // 12km * x
+        //////////////
+        (CalcResultType::Quantity(lhs_num, lhs_unit), CalcResultType::Number(rhs_num)) => {
+            // 2m * 5
+            lhs_num
+                .checked_mul(rhs_num)
+                .map(|num| CalcResult::new(CalcResultType::Quantity(num, lhs_unit.clone()), 0))
+        }
+        (
+            CalcResultType::Quantity(lhs_num, lhs_unit),
+            CalcResultType::Quantity(rhs_num, rhs_unit),
+        ) => {
+            // 2s * 3s
+            if lhs_unit.unit_count + rhs_unit.unit_count >= MAX_UNIT_COUNT {
+                None
+            } else {
+                let result = lhs_num.checked_mul(&rhs_num)?;
+                let (new_unit, k) = lhs_unit.mul(rhs_unit)?;
+                let corrected_result = result.checked_mul(&k)?;
+
+                Some(if new_unit.is_unitless() {
+                    CalcResult::new(CalcResultType::Number(corrected_result), 0)
+                } else {
+                    CalcResult::new(CalcResultType::Quantity(corrected_result, new_unit), 0)
+                })
+            }
+        }
+        (CalcResultType::Quantity(lhs, lhs_unit), CalcResultType::Percentage(rhs)) => {
+            // e.g. 2m * 50%
+            Some(CalcResult::new(
+                CalcResultType::Quantity(percentage_of(rhs, lhs)?, lhs_unit.clone()),
+                0,
+            ))
+        }
+        (CalcResultType::Quantity(..), CalcResultType::Matrix(mat)) => mat.mult_scalar(lhs),
+        //////////////
+        // 12% * x
+        //////////////
+        (CalcResultType::Percentage(lhs), CalcResultType::Number(rhs)) => {
+            // 5% * 10
+            Some(CalcResult::new(
+                CalcResultType::Number(percentage_of(lhs, rhs)?),
+                0,
+            ))
+        }
+        (CalcResultType::Percentage(lhs), CalcResultType::Quantity(rhs, rhs_unit)) => {
+            // 5% * 10km
+            Some(CalcResult::new(
+                CalcResultType::Quantity(percentage_of(lhs, rhs)?, rhs_unit.clone()),
+                0,
+            ))
+        }
+        (CalcResultType::Percentage(lhs), CalcResultType::Percentage(rhs)) => {
+            // 50% * 50%
+
+            Some(CalcResult::new(
+                CalcResultType::Percentage(
+                    (lhs.checked_div(&DECIMAL_100)?)
+                        .checked_mul(&rhs.checked_div(&DECIMAL_100)?)?,
+                ),
+                0,
+            ))
+        }
+        (CalcResultType::Percentage(..), CalcResultType::Matrix(..)) => None,
+        //////////////
+        // Matrix
+        //////////////
+        (CalcResultType::Matrix(mat), CalcResultType::Number(..))
+        | (CalcResultType::Matrix(mat), CalcResultType::Quantity(..))
+        | (CalcResultType::Matrix(mat), CalcResultType::Percentage(..)) => mat.mult_scalar(rhs),
+        (CalcResultType::Matrix(a), CalcResultType::Matrix(b)) => {
+            if a.col_count != b.row_count {
+                return None;
+            }
+            let mut result = Vec::with_capacity(a.row_count * b.col_count);
+            for row in 0..a.row_count {
+                for col in 0..b.col_count {
+                    let mut sum = if let Some(r) = multiply_op(a.cell(row, 0), b.cell(0, col)) {
+                        r
+                    } else {
+                        return None;
+                    };
+                    for i in 1..a.col_count {
+                        if let Some(r) = multiply_op(a.cell(row, i), b.cell(i, col)) {
+                            if let Some(s) = add_op(&sum, &r) {
+                                sum = s;
+                            } else {
+                                return None;
+                            }
+                        }
+                    }
+                    result.push(sum);
+                }
+            }
+            Some(CalcResult::new(
+                CalcResultType::Matrix(MatrixData::new(result, a.row_count, b.col_count)),
+                0,
+            ))
+        }
+    };
+    return match result {
+        Some(CalcResult {
+            typ: CalcResultType::Quantity(num, unit),
+            ..
+        }) if unit.is_unitless() => {
+            // some operation cancelled out its units, put a simple number on the stack
+            Some(CalcResult::new(CalcResultType::Number(num), 0))
+        }
+        _ => result,
+    };
+}
+
