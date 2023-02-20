@@ -552,3 +552,16 @@ pub fn debug_print(str: &str) {
     }
 }
 
+#[allow(dead_code)]
+#[allow(unused_variables)]
+pub fn pad_rust(error: &mut String, str: &str, len: usize) {
+    #[cfg(debug_assertions)]
+    {
+        error.push_str(str);
+        if str.len() < len {
+            for _ in 0..len - str.len() {
+                error.push(' ');
+            }
+        }
+    }
+}
