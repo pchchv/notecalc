@@ -919,6 +919,36 @@ fn sub_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
     }
 }
 
+pub fn pow(this: Decimal, mut exp: i64) -> Option<Decimal> {
+    if this.is_zero() && exp.is_negative() {
+        return None;
+    }
+
+    let mut base = this.clone();
+    let mut acc = Decimal::one();
+    let neg = exp < 0;
+
+    exp = exp.abs();
+
+    while exp > 1 {
+        if (exp & 1) == 1 {
+            acc = acc.checked_mul(&base)?;
+        }
+        exp /= 2;
+        base = base.checked_mul(&base)?;
+    }
+
+    if exp == 1 {
+        acc = acc.checked_mul(&base)?;
+    }
+
+    Some(if neg {
+        Decimal::one().checked_div(&acc)?
+    } else {
+        acc
+    })
+}
+
 pub fn dec<T: Into<Decimal>>(num: T) -> Decimal {
     num.into()
 }
