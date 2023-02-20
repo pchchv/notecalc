@@ -792,3 +792,130 @@ pub fn multiply_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
     };
 }
 
+fn sub_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
+    match (&lhs.typ, &rhs.typ) {
+        (CalcResultType::Unit(..), CalcResultType::Unit(..))
+        | (CalcResultType::Unit(..), CalcResultType::Number(..))
+        | (CalcResultType::Unit(..), CalcResultType::Quantity(..))
+        | (CalcResultType::Unit(..), CalcResultType::Percentage(..))
+        | (CalcResultType::Unit(..), CalcResultType::Matrix(..))
+        | (CalcResultType::Number(..), CalcResultType::Unit(..))
+        | (CalcResultType::Quantity(..), CalcResultType::Unit(..))
+        | (CalcResultType::Percentage(..), CalcResultType::Unit(..))
+        | (CalcResultType::Matrix(..), CalcResultType::Unit(..)) => None,
+        //////////////
+        // 12 - x
+        //////////////
+        (CalcResultType::Number(lhs), CalcResultType::Number(rhs)) => {
+            // 12 - 3
+            Some(CalcResult::new(
+                CalcResultType::Number(lhs.checked_sub(&rhs)?),
+                0,
+            ))
+        }
+        (CalcResultType::Number(_lhs), CalcResultType::Quantity(_rhs, _unit)) => {
+            // 12 - 3 km
+            None
+        }
+        (CalcResultType::Number(lhs), CalcResultType::Percentage(rhs)) => {
+            // 100 - 50%
+            let x_percent_of_left_hand_side = lhs
+                .checked_div(&DECIMAL_100)
+                .and_then(|it| it.checked_mul(rhs))?;
+            Some(CalcResult::new(
+                CalcResultType::Number(lhs.checked_sub(&x_percent_of_left_hand_side)?),
+                0,
+            ))
+        }
+        (CalcResultType::Number(..), CalcResultType::Matrix(..)) => None,
+        //////////////
+        // 12km - x
+        //////////////
+        (CalcResultType::Quantity(_lhs, _lhs_unit), CalcResultType::Number(_rhs)) => {
+            // 2m - 5
+            None
+        }
+        (
+            CalcResultType::Quantity(lhs_num, lhs_unit),
+            CalcResultType::Quantity(rhs_num, rhs_unit),
+        ) => {
+            // 2s - 3s
+            if !lhs_unit.is_compatible(rhs_unit) {
+                None
+            } else {
+                return if lhs_unit == rhs_unit {
+                    let result = lhs_num.checked_sub(rhs_num)?;
+                    Some(CalcResult::new(
+                        CalcResultType::Quantity(result, lhs_unit.clone()),
+                        0,
+                    ))
+                } else {
+                    let same_unit_rhs_num =
+                        UnitOutput::convert_same_powers(rhs_unit, lhs_unit, rhs_num)?;
+                    let result = lhs_num.checked_sub(&same_unit_rhs_num)?;
+                    Some(CalcResult::new(
+                        CalcResultType::Quantity(result, lhs_unit.clone()),
+                        0,
+                    ))
+                };
+            }
+        }
+        (CalcResultType::Quantity(lhs, lhs_unit), CalcResultType::Percentage(rhs)) => {
+            // e.g. 2m - 50%
+            let x_percent_of_left_hand_side = lhs
+                .checked_div(&DECIMAL_100)
+                .and_then(|it| it.checked_mul(rhs))?;
+            Some(CalcResult::new(
+                CalcResultType::Quantity(
+                    lhs.checked_sub(&x_percent_of_left_hand_side)?,
+                    lhs_unit.clone(),
+                ),
+                0,
+            ))
+        }
+        (CalcResultType::Quantity(..), CalcResultType::Matrix(..)) => None,
+        //////////////
+        // 12% - x
+        //////////////
+        (CalcResultType::Percentage(_lhs), CalcResultType::Number(_rhs)) => {
+            // 5% - 10
+            None
+        }
+        (CalcResultType::Percentage(_lhs), CalcResultType::Quantity(_rhs, _rhs_unit)) => {
+            // 5% - 10km
+            None
+        }
+        (CalcResultType::Percentage(lhs), CalcResultType::Percentage(rhs)) => {
+            // 50% - 50%
+            Some(CalcResult::new(
+                CalcResultType::Percentage(lhs.checked_sub(&rhs)?),
+                0,
+            ))
+        }
+        (CalcResultType::Percentage(..), CalcResultType::Matrix(..)) => None,
+        ///////////
+        // Matrix
+        //////////
+        (CalcResultType::Matrix(..), CalcResultType::Number(..)) => None,
+        (CalcResultType::Matrix(..), CalcResultType::Quantity(..)) => None,
+        (CalcResultType::Matrix(..), CalcResultType::Percentage(..)) => None,
+        (CalcResultType::Matrix(lhs), CalcResultType::Matrix(rhs)) => {
+            if lhs.row_count != rhs.row_count || lhs.col_count != rhs.col_count {
+                return None;
+            }
+            let cells: Option<Vec<CalcResult>> = lhs
+                .cells
+                .iter()
+                .zip(rhs.cells.iter())
+                .map(|(a, b)| sub_op(a, b))
+                .collect();
+            cells.map(|it| {
+                CalcResult::new(
+                    CalcResultType::Matrix(MatrixData::new(it, lhs.row_count, lhs.col_count)),
+                    0,
+                )
+            })
+        }
+    }
+}
+
