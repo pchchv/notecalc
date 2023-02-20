@@ -4,6 +4,7 @@ use crate::functions::FnType;
 use crate::helper::{content_y, AppTokens, BitFlag256};
 use crate::matrix::MatrixData;
 use crate::token_parser::{debug_print, OperatorTokenType, TokenType, UnitTokenType};
+use crate::units::consts::EMPTY_UNIT_DIMENSIONS;
 use crate::units::units::{UnitOutput, Units, MAX_UNIT_COUNT};
 use crate::{
     tracy_span, FunctionDefinitions, LineData, Variable, Variables, FIRST_FUNC_PARAM_VAR_INDEX,
@@ -1070,6 +1071,42 @@ pub fn add_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
             })
         }
     }
+}
+
+fn apply_unit_to_num(
+    num: &Decimal,
+    target_unit: &UnitOutput,
+    operand_token_index: usize,
+    unit_token_index: usize,
+) -> Option<CalcResult> {
+    if target_unit.dimensions == EMPTY_UNIT_DIMENSIONS {
+        // the units cancelled each other, e.g. 1 km/m
+        let k = target_unit.get_unit_coeff()?;
+        Some(CalcResult::new(
+            CalcResultType::Number(num.checked_mul(&k)?),
+            operand_token_index,
+        ))
+    } else {
+        Some(CalcResult::new2(
+            CalcResultType::Quantity(num.clone(), target_unit.clone()),
+            operand_token_index,
+            unit_token_index,
+        ))
+    }
+}
+
+fn unary_operation(
+    op: &OperatorTokenType,
+    top: &CalcResult,
+    op_token_index: usize,
+) -> Option<CalcResult> {
+    return match &op {
+        OperatorTokenType::UnaryPlus => Some(top.clone()),
+        OperatorTokenType::UnaryMinus => unary_minus_op(top),
+        OperatorTokenType::Perc => percentage_operator(top, op_token_index),
+        OperatorTokenType::BinNot => bitwise_not(top),
+        _ => None,
+    };
 }
 
 pub fn pow(this: Decimal, mut exp: i64) -> Option<Decimal> {
