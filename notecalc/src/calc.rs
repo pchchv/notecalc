@@ -501,6 +501,46 @@ pub fn process_variable_assignment_or_line_ref<'a, 'b>(
     }
 }
 
+pub fn get_var_name_from_assignment(
+    editor_y: usize,
+    editor_content: &EditorContent<LineData>,
+) -> &[char] {
+    let line = editor_content.get_line_valid_chars(editor_y);
+    let mut i = 0;
+    if line[0] == '=' {
+        // it might happen that there are more '=' in a line.
+        // To avoid panic, start the index from 1, so if the first char is
+        // '=', it will be ignored.
+        i += 1;
+    }
+    // skip whitespaces
+    while line[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let start = i;
+    // take until '='
+    while i < line.len() && line[i] != '=' {
+        i += 1;
+    }
+    if i == line.len() {
+        return &[];
+    }
+    // remove trailing whitespaces
+    i -= 1;
+    while i > start && line[i].is_ascii_whitespace() {
+        i -= 1;
+    }
+    let end = i;
+    return &line[start..=end];
+}
+
+fn get_token_index_into_tokens(apptokens: &AppTokens, editor_y: usize, i: usize) -> usize {
+    let tokens = apptokens[content_y(editor_y)].as_ref().unwrap();
+    let shunting_tokens = &tokens.shunting_output_stack;
+    let token = &shunting_tokens[i];
+    return token.index_into_tokens;
+}
+
 pub fn divide_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
     let result: Option<CalcResult> = match (&lhs.typ, &rhs.typ) {
         (CalcResultType::Unit(..), CalcResultType::Unit(..))
@@ -509,9 +549,7 @@ pub fn divide_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
         | (CalcResultType::Unit(..), CalcResultType::Percentage(..))
         | (CalcResultType::Unit(..), CalcResultType::Matrix(..))
         | (CalcResultType::Matrix(..), CalcResultType::Unit(..)) => None,
-        //////////////
         // 30 years * 12/year
-        //////////////
         (CalcResultType::Quantity(..), CalcResultType::Unit(rhs_unit)) => divide_op(
             lhs,
             &CalcResult {
@@ -527,9 +565,7 @@ pub fn divide_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
                 0,
             ))
         }
-        //////////////
         // 5% / year
-        //////////////
         (CalcResultType::Percentage(num), CalcResultType::Unit(unit)) => {
             let new_unit = unit.pow(-1)?;
             Some(CalcResult::new(
@@ -537,9 +573,7 @@ pub fn divide_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
                 0,
             ))
         }
-        //////////////
         // 12 / x
-        //////////////
         (CalcResultType::Number(lhs), CalcResultType::Number(rhs)) => {
             // 100 / 2
             Some(CalcResult::new(
@@ -571,9 +605,7 @@ pub fn divide_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
             ))
         }
         (CalcResultType::Number(..), CalcResultType::Matrix(..)) => None,
-        //////////////
         // 12km / x
-        //////////////
         (CalcResultType::Quantity(lhs_num, lhs_unit), CalcResultType::Number(rhs)) => {
             // 2m / 5
             if rhs.is_zero() {
@@ -614,9 +646,7 @@ pub fn divide_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
             None
         }
         (CalcResultType::Quantity(..), CalcResultType::Matrix(..)) => None,
-        //////////////
         // 12% / x
-        //////////////
         (CalcResultType::Percentage(_lhs), CalcResultType::Number(_rhs)) => {
             // 5% / 10
             None
@@ -658,9 +688,7 @@ pub fn multiply_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
         | (CalcResultType::Quantity(..), CalcResultType::Unit(..))
         | (CalcResultType::Percentage(..), CalcResultType::Unit(..))
         | (CalcResultType::Matrix(..), CalcResultType::Unit(..)) => None,
-        //////////////
         // 12 * x
-        //////////////
         (CalcResultType::Number(lhs), CalcResultType::Number(rhs)) => {
             // 12 * 2
             lhs.checked_mul(rhs)
@@ -679,9 +707,7 @@ pub fn multiply_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
             ))
         }
         (CalcResultType::Number(..), CalcResultType::Matrix(mat)) => mat.mult_scalar(lhs),
-        //////////////
         // 12km * x
-        //////////////
         (CalcResultType::Quantity(lhs_num, lhs_unit), CalcResultType::Number(rhs_num)) => {
             // 2m * 5
             lhs_num
@@ -715,9 +741,7 @@ pub fn multiply_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
             ))
         }
         (CalcResultType::Quantity(..), CalcResultType::Matrix(mat)) => mat.mult_scalar(lhs),
-        //////////////
         // 12% * x
-        //////////////
         (CalcResultType::Percentage(lhs), CalcResultType::Number(rhs)) => {
             // 5% * 10
             Some(CalcResult::new(
@@ -744,9 +768,7 @@ pub fn multiply_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
             ))
         }
         (CalcResultType::Percentage(..), CalcResultType::Matrix(..)) => None,
-        //////////////
         // Matrix
-        //////////////
         (CalcResultType::Matrix(mat), CalcResultType::Number(..))
         | (CalcResultType::Matrix(mat), CalcResultType::Quantity(..))
         | (CalcResultType::Matrix(mat), CalcResultType::Percentage(..)) => mat.mult_scalar(rhs),
@@ -803,9 +825,7 @@ fn sub_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
         | (CalcResultType::Quantity(..), CalcResultType::Unit(..))
         | (CalcResultType::Percentage(..), CalcResultType::Unit(..))
         | (CalcResultType::Matrix(..), CalcResultType::Unit(..)) => None,
-        //////////////
         // 12 - x
-        //////////////
         (CalcResultType::Number(lhs), CalcResultType::Number(rhs)) => {
             // 12 - 3
             Some(CalcResult::new(
@@ -828,9 +848,7 @@ fn sub_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
             ))
         }
         (CalcResultType::Number(..), CalcResultType::Matrix(..)) => None,
-        //////////////
         // 12km - x
-        //////////////
         (CalcResultType::Quantity(_lhs, _lhs_unit), CalcResultType::Number(_rhs)) => {
             // 2m - 5
             None
@@ -874,9 +892,7 @@ fn sub_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
             ))
         }
         (CalcResultType::Quantity(..), CalcResultType::Matrix(..)) => None,
-        //////////////
         // 12% - x
-        //////////////
         (CalcResultType::Percentage(_lhs), CalcResultType::Number(_rhs)) => {
             // 5% - 10
             None
@@ -893,9 +909,7 @@ fn sub_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
             ))
         }
         (CalcResultType::Percentage(..), CalcResultType::Matrix(..)) => None,
-        ///////////
         // Matrix
-        //////////
         (CalcResultType::Matrix(..), CalcResultType::Number(..)) => None,
         (CalcResultType::Matrix(..), CalcResultType::Quantity(..)) => None,
         (CalcResultType::Matrix(..), CalcResultType::Percentage(..)) => None,
@@ -921,9 +935,7 @@ fn sub_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
 
 fn pow_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
     match (&lhs.typ, &rhs.typ) {
-        //////////////
         // 1^x
-        //////////////
         (CalcResultType::Number(lhs), CalcResultType::Number(rhs)) => {
             // 2^3
             rhs.to_i64()
@@ -957,9 +969,7 @@ pub fn add_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
         | (CalcResultType::Quantity(..), CalcResultType::Unit(..))
         | (CalcResultType::Percentage(..), CalcResultType::Unit(..))
         | (CalcResultType::Matrix(..), CalcResultType::Unit(..)) => None,
-        //////////////
         // 12 + x
-        //////////////
         (CalcResultType::Number(lhs), CalcResultType::Number(rhs)) => {
             // 12 + 3
             Some(CalcResult::new(
@@ -982,9 +992,7 @@ pub fn add_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
             ))
         }
         (CalcResultType::Number(_lhs), CalcResultType::Matrix(..)) => None,
-        //////////////
         // 12km + x
-        //////////////
         (CalcResultType::Quantity(_lhs, _lhs_unit), CalcResultType::Number(_rhs)) => {
             // 2m + 5
             None
@@ -1026,9 +1034,7 @@ pub fn add_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
             ))
         }
         (CalcResultType::Quantity(..), CalcResultType::Matrix(..)) => None,
-        //////////////
         // 12% + x
-        //////////////
         (CalcResultType::Percentage(_lhs), CalcResultType::Number(_rhs)) => {
             // 5% + 10
             None
@@ -1042,9 +1048,7 @@ pub fn add_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
             Some(CalcResult::new(CalcResultType::Percentage(lhs + rhs), 0))
         }
         (CalcResultType::Percentage(..), CalcResultType::Matrix(..)) => None,
-        ///////////
         // Matrix
-        //////////
         (CalcResultType::Matrix(..), CalcResultType::Number(..)) => None,
         (CalcResultType::Matrix(..), CalcResultType::Quantity(..)) => None,
         (CalcResultType::Matrix(..), CalcResultType::Percentage(..)) => None,
