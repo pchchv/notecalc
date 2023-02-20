@@ -1113,6 +1113,43 @@ fn unary_minus_op(lhs: &CalcResult) -> Option<CalcResult> {
         CalcResultType::Matrix(mat) => CalcResultType::Matrix(mat.neg()),
     }
 }
+
+fn bitwise_shift_right(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
+    match (&lhs.typ, &rhs.typ) {
+        (CalcResultType::Number(lhs), CalcResultType::Number(rhs)) => {
+            let lhs = lhs.to_u64()?;
+            let rhs = rhs.to_u32()?;
+            if rhs > 63 {
+                None
+            } else {
+                Some(CalcResult::new(
+                    CalcResultType::Number(dec(lhs.shr(rhs))),
+                    0,
+                ))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn bitwise_shift_left(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
+    match (&lhs.typ, &rhs.typ) {
+        (CalcResultType::Number(lhs), CalcResultType::Number(rhs)) => {
+            let lhs = lhs.to_u64()?;
+            let rhs = rhs.to_u32()?;
+            if rhs > 63 {
+                None
+            } else {
+                Some(CalcResult::new(
+                    CalcResultType::Number(dec(lhs.shl(rhs))),
+                    0,
+                ))
+            }
+        }
+        _ => None,
+    }
+}
+
 fn apply_unit_to_num(
     num: &Decimal,
     target_unit: &UnitOutput,
