@@ -1115,6 +1115,44 @@ fn unary_minus_op(lhs: &CalcResult) -> Option<CalcResult> {
     }
 }
 
+fn percentage_operator(lhs: &CalcResult, op_token_index: usize) -> Option<CalcResult> {
+    match &lhs.typ {
+        CalcResultType::Number(lhs_num) => {
+            // 5%
+            Some(CalcResult::new2(
+                CalcResultType::Percentage(lhs_num.clone()),
+                lhs.index_into_tokens,
+                op_token_index,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn percentage_find_rate_from_result_base(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
+    // lhs is what percent of lhs
+    // 20 is what percent of 60
+    match (&lhs.typ, &rhs.typ) {
+        (CalcResultType::Number(y), CalcResultType::Number(x)) => {
+            let p = y.checked_div(x)?.checked_mul(&DECIMAL_100)?;
+            Some(CalcResult::new(CalcResultType::Percentage(p), 0))
+        }
+        _ => None,
+    }
+}
+
+fn percentage_find_base_from_result_rate(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
+    // lhs is rhs% of what
+    // 5 is 25% of what
+    match (&lhs.typ, &rhs.typ) {
+        (CalcResultType::Number(y), CalcResultType::Percentage(p)) => {
+            let x = y.checked_div(p)?.checked_mul(&DECIMAL_100)?;
+            Some(CalcResult::new(CalcResultType::Number(x), 0))
+        }
+        _ => None,
+    }
+}
+
 fn bitwise_not(lhs: &CalcResult) -> Option<CalcResult> {
     match &lhs.typ {
         CalcResultType::Number(lhs_num) => {
@@ -1131,9 +1169,7 @@ fn bitwise_not(lhs: &CalcResult) -> Option<CalcResult> {
 
 fn bitwise_xor_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
     match (&lhs.typ, &rhs.typ) {
-        //////////////
         // 12 and x
-        //////////////
         (CalcResultType::Number(lhs), CalcResultType::Number(rhs)) => {
             // 0b01 and 0b10
             let lhs = lhs.to_u64()?;
@@ -1149,9 +1185,7 @@ fn bitwise_xor_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
 
 fn bitwise_or_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
     match (&lhs.typ, &rhs.typ) {
-        //////////////
         // 12 and x
-        //////////////
         (CalcResultType::Number(lhs), CalcResultType::Number(rhs)) => {
             // 0b01 and 0b10
             let lhs = lhs.to_u64()?;
