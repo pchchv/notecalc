@@ -84,6 +84,50 @@ impl ShuntingYardResult {
     }
 }
 
+#[derive(Debug)]
+pub struct EvalErr {
+    pub token_index: usize,
+    pub token_index_lhs_1: Option<usize>,
+    pub token_index_lhs_2: Option<usize>,
+    pub token_index_rhs_1: Option<usize>,
+    pub token_index_rhs_2: Option<usize>,
+    pub reason: String,
+}
+impl EvalErr {
+    pub fn new(str: String, token_index: usize) -> EvalErr {
+        EvalErr {
+            token_index,
+            token_index_lhs_1: None,
+            token_index_lhs_2: None,
+            token_index_rhs_1: None,
+            token_index_rhs_2: None,
+            reason: str,
+        }
+    }
+
+    pub fn new2(str: String, param: &CalcResult) -> EvalErr {
+        EvalErr {
+            token_index: param.index_into_tokens,
+            token_index_lhs_1: param.index2_into_tokens,
+            token_index_lhs_2: None,
+            token_index_rhs_1: None,
+            token_index_rhs_2: None,
+            reason: str,
+        }
+    }
+
+    pub fn new3(str: String, token_index: usize, lhs: &CalcResult, rhs: &CalcResult) -> EvalErr {
+        EvalErr {
+            token_index,
+            reason: str,
+            token_index_lhs_1: Some(lhs.index_into_tokens),
+            token_index_lhs_2: lhs.index2_into_tokens,
+            token_index_rhs_1: Some(rhs.index_into_tokens),
+            token_index_rhs_2: rhs.index2_into_tokens,
+        }
+    }
+}
+
 pub fn divide_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
     let result: Option<CalcResult> = match (&lhs.typ, &rhs.typ) {
         (CalcResultType::Unit(..), CalcResultType::Unit(..))
