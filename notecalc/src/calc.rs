@@ -919,3 +919,11 @@ fn sub_op(lhs: &CalcResult, rhs: &CalcResult) -> Option<CalcResult> {
     }
 }
 
+pub fn dec<T: Into<Decimal>>(num: T) -> Decimal {
+    num.into()
+}
+
+fn percentage_of(this: &Decimal, base: &Decimal) -> Option<Decimal> {
+    base.checked_div(&DECIMAL_100)?.checked_mul(this)
+}
+
