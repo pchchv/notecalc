@@ -538,3 +538,17 @@ impl TokenParser {
         };
         return result;
     }
+
+
+#[allow(dead_code)]
+#[allow(unused_variables)]
+pub fn debug_print(str: &str) {
+    if false {
+        return;
+    }
+    #[cfg(debug_assertions)]
+    {
+        println!("{}", str);
+    }
+}
+
