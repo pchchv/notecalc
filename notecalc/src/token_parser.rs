@@ -289,6 +289,275 @@ impl TokenParser {
         }
     }
 
+    pub fn try_extract_token<'text_ptr>(
+        rest_str: &[char],
+        variable_names: &Variables,
+        dst: &[Token<'text_ptr>],
+        units: &Units,
+        line_index: usize,
+        can_be_unit: Option<UnitTokenType>,
+        can_be_unit_converter: bool,
+        allocator: &'text_ptr Bump,
+        function_param_count: usize,
+        func_defs: &FunctionDefinitions<'text_ptr>,
+    ) -> Token<'text_ptr> {
+        return if let Some(token) = TokenParser::try_extract_comment(rest_str, allocator) {
+            token
+        } else {
+            let prev_was_lineref = dst
+                .last()
+                .map(|token| matches!(token.typ, TokenType::LineReference { .. }))
+                .unwrap_or(false);
+            if let Some(token) = TokenParser::try_extract_variable_name(
+                rest_str,
+                variable_names,
+                line_index,
+                allocator,
+                prev_was_lineref,
+                function_param_count,
+                func_defs,
+            ) {
+                token
+            } else if let Some(token) = TokenParser::try_extract_unit(
+                rest_str,
+                units,
+                can_be_unit,
+                can_be_unit_converter,
+                allocator,
+            ) {
+                token
+            } else if let Some(token) =
+                TokenParser::try_extract_operator(rest_str, allocator, can_be_unit_converter)
+            {
+                token
+            } else if let Some(token) = TokenParser::try_extract_number_literal(rest_str, allocator)
+            {
+                token
+            } else {
+                TokenParser::try_extract_string_literal(rest_str, allocator)
+            }
+        };
+    }
+
+    #[inline]
+    pub fn try_extract_number_literal<'text_ptr>(
+        str: &[char],
+        allocator: &'text_ptr Bump,
+    ) -> Option<Token<'text_ptr>> {
+        tracy_span("try_extract_number_literal", file!(), line!());
+        let mut number_str = [b'0'; 256];
+        let mut number_str_index = 0;
+        let mut i = 0;
+        // unary minus is parsed as part of the number only if
+        // it is right before the number
+        if str[0] == '-'
+            && str
+                .get(1)
+                .map(|it| !it.is_ascii_whitespace())
+                .unwrap_or(false)
+        {
+            number_str[0] = b'-';
+            number_str_index = 1;
+            i = 1;
+        };
+
+        if str[0] == 'π' {
+            return Some(Token {
+                typ: TokenType::NumberLiteral(DECIMAL_PI),
+                ptr: allocator.alloc_slice_fill_iter(str.iter().map(|it| *it).take(1)),
+                has_error: false,
+            });
+        }
+
+        let result = if str[i..].starts_with(&['0', 'b']) {
+            i += 2;
+            let mut end_index_before_last_whitespace = i;
+            while i < str.len() {
+                if str[i] == '0' || str[i] == '1' {
+                    end_index_before_last_whitespace = i + 1;
+                    number_str[number_str_index] = str[i] as u8;
+                    number_str_index += 1;
+                } else if str[i].is_ascii_whitespace() || str[i] == '_' {
+                    // allowed
+                } else {
+                    break;
+                }
+                i += 1;
+            }
+            i = end_index_before_last_whitespace;
+            if i > 2 {
+                // Decimal cannot parse binary, that's why the explicit i64 type
+                let num: i64 = i64::from_str_radix(
+                    &unsafe { std::str::from_utf8_unchecked(&number_str[0..number_str_index]) },
+                    2,
+                )
+                .ok()?;
+                Some(Token {
+                    typ: TokenType::NumberLiteral(num.into()),
+                    // ptr: &str[0..i],
+                    ptr: allocator.alloc_slice_fill_iter(str.iter().map(|it| *it).take(i)),
+                    has_error: false,
+                })
+            } else {
+                None
+            }
+        } else if str[i..].starts_with(&['0', 'x']) {
+            i += 2;
+            let mut end_index_before_last_whitespace = i;
+            while i < str.len() {
+                if str[i].is_ascii_hexdigit()
+                    && str
+                        .get(i + 1)
+                        .map(|it| it.is_ascii_hexdigit() || *it == '_' || !it.is_alphabetic())
+                        .unwrap_or(true)
+                {
+                    end_index_before_last_whitespace = i + 1;
+                    number_str[number_str_index] = str[i] as u8;
+                    number_str_index += 1;
+                } else if str[i] == '_' {
+                    // allowed
+                } else {
+                    break;
+                }
+                i += 1;
+            }
+            i = end_index_before_last_whitespace;
+            if i > 2 {
+                // Decimal cannot parse hex, that's why the explicit i64 type
+                let num: u64 = u64::from_str_radix(
+                    &unsafe { std::str::from_utf8_unchecked(&number_str[0..number_str_index]) },
+                    16,
+                )
+                .ok()?;
+                Some(Token {
+                    typ: TokenType::NumberLiteral(num.into()),
+                    // ptr: &str[0..i],
+                    ptr: allocator.alloc_slice_fill_iter(str.iter().map(|it| *it).take(i)),
+                    has_error: false,
+                })
+            } else {
+                None
+            }
+        } else if str
+            .get(0)
+            .map(|it| it.is_ascii_digit() || *it == '.' || *it == '-')
+            .unwrap_or(false)
+        {
+            let mut decimal_point_count = 0;
+            let mut digit_count = 0;
+            let mut e_count = 0;
+            let mut end_index_before_last_whitespace = 0;
+            let mut e_neg = false;
+            let mut e_already_added = false;
+            let mut multiplier = None;
+
+            while i < str.len() {
+                if str[i] == '.' && decimal_point_count < 1 && e_count < 1 {
+                    decimal_point_count += 1;
+                    end_index_before_last_whitespace = i + 1;
+                    number_str[number_str_index] = str[i] as u8;
+                    number_str_index += 1;
+                } else if str[i] == '-' && e_count == 1 {
+                    if e_neg || e_already_added {
+                        break;
+                    }
+                    e_neg = true;
+                } else if str[i] == 'e' && e_count < 1 && !str[i - 1].is_ascii_whitespace() {
+                    // cannot have whitespace before 'e'
+                    e_count += 1;
+                } else if str[i] == 'k'
+                    && e_count < 1
+                    && !str[i - 1].is_ascii_whitespace()
+                    && str.get(i + 1).map(|it| !it.is_alphabetic()).unwrap_or(true)
+                {
+                    multiplier = Some(1_000);
+                    end_index_before_last_whitespace = i + 1;
+                    break;
+                } else if str[i] == 'M'
+                    && e_count < 1
+                    && !str[i - 1].is_ascii_whitespace()
+                    && str.get(i + 1).map(|it| !it.is_alphabetic()).unwrap_or(true)
+                {
+                    multiplier = Some(1_000_000);
+                    end_index_before_last_whitespace = i + 1;
+                    break;
+                } else if str[i].is_ascii_digit() {
+                    if e_count > 0 && !e_already_added {
+                        number_str[number_str_index] = 'e' as u8;
+                        number_str_index += 1;
+                        if e_neg {
+                            number_str[number_str_index] = '-' as u8;
+                            number_str_index += 1;
+                        }
+                        number_str[number_str_index] = str[i] as u8;
+                        number_str_index += 1;
+                        end_index_before_last_whitespace = i + 1;
+                        e_already_added = true;
+                    } else {
+                        digit_count += 1;
+                        end_index_before_last_whitespace = i + 1;
+                        number_str[number_str_index] = str[i] as u8;
+                        number_str_index += 1;
+                    }
+                } else if str[i].is_ascii_whitespace() {
+                    // allowed
+                } else {
+                    break;
+                }
+                i += 1;
+            }
+            i = end_index_before_last_whitespace;
+            if digit_count > 0 {
+                let num = if e_already_added {
+                    Decimal::from_scientific(&unsafe {
+                        std::str::from_utf8_unchecked(&number_str[0..number_str_index])
+                    })
+                } else {
+                    Decimal::from_str(&unsafe {
+                        std::str::from_utf8_unchecked(&number_str[0..number_str_index])
+                    })
+                };
+                if let Ok(num) = num {
+                    if let Some(multiplier) = multiplier {
+                        if let Some(result) = Decimal::from(multiplier).checked_mul(&num) {
+                            Some(Token {
+                                typ: TokenType::NumberLiteral(result),
+                                ptr: allocator
+                                    .alloc_slice_fill_iter(str.iter().map(|it| *it).take(i)),
+                                has_error: false,
+                            })
+                        } else {
+                            Some(Token {
+                                typ: TokenType::NumberErr,
+                                ptr: allocator
+                                    .alloc_slice_fill_iter(str.iter().map(|it| *it).take(i)),
+                                has_error: true,
+                            })
+                        }
+                    } else {
+                        Some(Token {
+                            typ: TokenType::NumberLiteral(num),
+                            ptr: allocator.alloc_slice_fill_iter(str.iter().map(|it| *it).take(i)),
+                            has_error: false,
+                        })
+                    }
+                } else {
+                    Some(Token {
+                        typ: TokenType::NumberErr,
+                        // ptr: &str[0..i],
+                        ptr: allocator.alloc_slice_fill_iter(str.iter().map(|it| *it).take(i)),
+                        has_error: true,
+                    })
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        return result;
+    }
+
     #[inline]
     fn try_extract_unit<'text_ptr>(
         str: &[char],
@@ -539,6 +808,161 @@ impl TokenParser {
         return result;
     }
 
+    #[inline]
+    fn try_extract_operator<'text_ptr>(
+        str: &[char],
+        allocator: &'text_ptr Bump,
+        can_be_unit_converter: bool,
+    ) -> Option<Token<'text_ptr>> {
+        tracy_span("try_extract_operator", file!(), line!());
+        fn op<'text_ptr>(
+            typ: OperatorTokenType,
+            str: &[char],
+            len: usize,
+            allocator: &'text_ptr Bump,
+        ) -> Option<Token<'text_ptr>> {
+            return Some(Token {
+                typ: TokenType::Operator(typ),
+                // ptr: &str[0..len],
+                ptr: allocator.alloc_slice_fill_iter(str.iter().map(|it| *it).take(len)),
+                has_error: false,
+            });
+        }
+        fn cmp<'text_ptr>(str: &[char], expected: &[char]) -> bool {
+            return str.starts_with(expected)
+                && str
+                    .get(expected.len())
+                    .map(|it| !it.is_alphabetic())
+                    .unwrap_or(true);
+        }
+        let result = match str[0] {
+            '=' => op(OperatorTokenType::Assign, str, 1, allocator),
+            '+' => op(OperatorTokenType::Add, str, 1, allocator),
+            '-' => op(OperatorTokenType::Sub, str, 1, allocator),
+            '*' => op(OperatorTokenType::Mult, str, 1, allocator),
+            '/' => op(OperatorTokenType::Div, str, 1, allocator),
+            '%' => op(OperatorTokenType::Perc, str, 1, allocator),
+            '^' => op(OperatorTokenType::Pow, str, 1, allocator),
+            '(' => op(OperatorTokenType::ParenOpen, str, 1, allocator),
+            ')' => op(OperatorTokenType::ParenClose, str, 1, allocator),
+            '[' => op(OperatorTokenType::BracketOpen, str, 1, allocator),
+            ']' => op(OperatorTokenType::BracketClose, str, 1, allocator),
+            ',' => op(OperatorTokenType::Comma, str, 1, allocator),
+            ';' => op(OperatorTokenType::Semicolon, str, 1, allocator),
+            _ => {
+                if str.starts_with(&['i', 'n', ' ']) && can_be_unit_converter {
+                    op(OperatorTokenType::UnitConverter, str, 2, allocator)
+                } else if cmp(
+                    str,
+                    &['i', 's', ' ', 'w', 'h', 'a', 't', ' ', '%', ' ', 'o', 'n'],
+                ) {
+                    op(
+                        OperatorTokenType::Percentage_Find_Incr_Rate_From_Result_X_Base,
+                        str,
+                        12,
+                        allocator,
+                    )
+                } else if cmp(
+                    str,
+                    &[
+                        'i', 's', ' ', 'w', 'h', 'a', 't', ' ', '%', ' ', 'o', 'f', 'f',
+                    ],
+                ) {
+                    op(
+                        OperatorTokenType::Percentage_Find_Decr_Rate_From_Result_X_Base,
+                        str,
+                        13,
+                        allocator,
+                    )
+                } else if cmp(str, &['o', 'n', ' ', 'w', 'h', 'a', 't', ' ', 'i', 's']) {
+                    op(
+                        OperatorTokenType::Percentage_Find_Base_From_Icrease_X_Result,
+                        str,
+                        10,
+                        allocator,
+                    )
+                } else if cmp(
+                    str,
+                    &['o', 'f', 'f', ' ', 'w', 'h', 'a', 't', ' ', 'i', 's'],
+                ) {
+                    op(
+                        OperatorTokenType::Percentage_Find_Base_From_Decrease_X_Result,
+                        str,
+                        11,
+                        allocator,
+                    )
+                } else if cmp(str, &['o', 'n', ' ', 'w', 'h', 'a', 't']) {
+                    op(
+                        OperatorTokenType::Percentage_Find_Base_From_Result_Increase_X,
+                        str,
+                        7,
+                        allocator,
+                    )
+                } else if cmp(str, &['o', 'f', 'f', ' ', 'w', 'h', 'a', 't']) {
+                    op(
+                        OperatorTokenType::Percentage_Find_Base_From_Result_Decrease_X,
+                        str,
+                        8,
+                        allocator,
+                    )
+                } else if cmp(str, &['w', 'h', 'a', 't', ' ', 'p', 'l', 'u', 's']) {
+                    op(
+                        OperatorTokenType::Percentage_Find_Base_From_X_Icrease_Result,
+                        str,
+                        9,
+                        allocator,
+                    )
+                } else if cmp(str, &['w', 'h', 'a', 't', ' ', 'm', 'i', 'n', 'u', 's']) {
+                    op(
+                        OperatorTokenType::Percentage_Find_Base_From_X_Decrease_Result,
+                        str,
+                        10,
+                        allocator,
+                    )
+                } else if cmp(str, &['o', 'f', ' ', 'w', 'h', 'a', 't']) {
+                    op(
+                        OperatorTokenType::Percentage_Find_Base_From_Result_Rate,
+                        str,
+                        7,
+                        allocator,
+                    )
+                } else if cmp(
+                    str,
+                    &[
+                        'i', 's', ' ', 'w', 'h', 'a', 't', ' ', 'p', 'e', 'r', 'c', 'e', 'n', 't',
+                        ' ', 'o', 'f',
+                    ],
+                ) {
+                    op(
+                        OperatorTokenType::Percentage_Find_Rate_From_Result_Base,
+                        str,
+                        18,
+                        allocator,
+                    )
+                } else if cmp(str, &['i', 's']) {
+                    op(OperatorTokenType::PercentageIs, str, 2, allocator)
+                } else if cmp(str, &['A', 'N', 'D']) {
+                    // TODO unit test "0xff and(12)"
+                    op(OperatorTokenType::BinAnd, str, 3, allocator)
+                } else if cmp(str, &['O', 'R']) {
+                    op(OperatorTokenType::BinOr, str, 2, allocator)
+                } else if cmp(str, &['N', 'O', 'T', '(']) {
+                    op(OperatorTokenType::BinNot, str, 3, allocator)
+                    // '(' will be parsed separately as an operator
+                } else if cmp(str, &['X', 'O', 'R']) {
+                    op(OperatorTokenType::BinXor, str, 3, allocator)
+                } else if str.starts_with(&['<', '<']) {
+                    op(OperatorTokenType::ShiftLeft, str, 2, allocator)
+                } else if str.starts_with(&['>', '>']) {
+                    op(OperatorTokenType::ShiftRight, str, 2, allocator)
+                } else {
+                    None
+                }
+            }
+        };
+        return result;
+    }
+}
 
 #[allow(dead_code)]
 #[allow(unused_variables)]
