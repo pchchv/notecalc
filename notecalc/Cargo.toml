@@ -5,4 +5,24 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+tracy = ["tracy-client"]
+
 [dependencies]
+const_fn = "^0.4"
+const_panic = "^0.2.7"
+rustc-ap-syntax_pos = "^634.0.0"
+bigdecimal = "^0.2.0"
+byteorder = "^1.3.4"
+strum = "^0.18.0"
+strum_macros = "^0.18.0"
+bumpalo = "^3.4.0"
+#rust_decimal = {path = "../../rust-decimal"}
+rust_decimal = {git = "https://github.com/bbodi/rust-decimal.git"}
+tinyvec = "^1.1.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tracy-client = { version = "^0.10.0", features = ["enable"], optional = true  }
+
+[dev-dependencies]
+rand = "^0.7.3"
