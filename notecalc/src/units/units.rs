@@ -1,5 +1,5 @@
 use crate::calc::pow;
-use crate::units::consts::{
+use crate::units::constants::{
     get_base_unit_for, init_aliases, init_units, UnitDimensionExponent, UnitType,
     BASE_UNIT_DIMENSIONS, BASE_UNIT_DIMENSION_COUNT,
 };
@@ -529,11 +529,6 @@ impl UnitOutput {
 
     pub fn simplify(&self, units: &Units) -> Option<UnitOutput> {
         if let Some(base_unit) = units.simplify(self) {
-            //if true {
-            //    panic!();
-            //}
-            // e.g. don't convert from km to m, but convert from kg*m/s^2 to N
-            // base_unit.unit_count is always 1
             let base_unit_is_simpler = self.unit_count > 1;
             if base_unit_is_simpler {
                 Some(base_unit)
@@ -818,7 +813,7 @@ impl Debug for UnitInstance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::units::consts::EMPTY_UNIT_DIMENSIONS;
+    use crate::units::constants::EMPTY_UNIT_DIMENSIONS;
     use rust_decimal::prelude::*;
 
     fn parse(str: &str, units: &Units) -> UnitOutput {
