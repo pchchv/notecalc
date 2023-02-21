@@ -1220,7 +1220,6 @@ pub fn init_units() -> (HashMap<&'static str, Rc<Unit>>, UnitPrefixes) {
             prefix_groups: (Some(Rc::clone(&prefixes.long)), None),
             value: Decimal::one(),
             offset: Decimal::zero(),
-            reciprocal: true,
         },
     );
     map.insert(
@@ -1231,7 +1230,6 @@ pub fn init_units() -> (HashMap<&'static str, Rc<Unit>>, UnitPrefixes) {
             prefix_groups: (Some(Rc::clone(&prefixes.short)), None),
             value: Decimal::one(),
             offset: Decimal::zero(),
-            reciprocal: true,
         },
     );
     // Angle
