@@ -1,3 +1,86 @@
+use std::fmt::Debug;
+use std::ops::{Range, RangeInclusive};
+
+pub const EDITOR_CURSOR_TICK_MS: u32 = 500;
+pub const TAB_SIZE: usize = 4;
+pub const SPACES: [&str; 4] = [" ", "  ", "   ", "    "];
+
+#[derive(Eq, PartialEq, Debug, Clone, Copy)]
+pub enum EditorInputEvent {
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    Esc,
+    PageUp,
+    PageDown,
+    Enter,
+    Backspace,
+    Del,
+    Tab,
+    Char(char),
+}
+
+#[repr(C)]
+#[derive(Eq, PartialEq, Debug, Clone, Copy)]
+pub struct InputModifiers {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+}
+
+impl InputModifiers {
+    pub fn none() -> InputModifiers {
+        InputModifiers {
+            shift: false,
+            ctrl: false,
+            alt: false,
+        }
+    }
+
+    pub fn ctrl() -> InputModifiers {
+        InputModifiers {
+            shift: false,
+            ctrl: true,
+            alt: false,
+        }
+    }
+
+    pub fn alt() -> InputModifiers {
+        InputModifiers {
+            shift: false,
+            ctrl: false,
+            alt: true,
+        }
+    }
+
+    pub fn shift() -> InputModifiers {
+        InputModifiers {
+            shift: true,
+            ctrl: false,
+            alt: false,
+        }
+    }
+
+    pub fn ctrl_shift() -> InputModifiers {
+        InputModifiers {
+            shift: true,
+            ctrl: true,
+            alt: false,
+        }
+    }
+
+    pub fn is_ctrl_shift(&self) -> bool {
+        self.ctrl && self.shift
+    }
+
+    pub fn is_none(&self) -> bool {
+        !self.ctrl && !self.shift && !self.alt
+    }
+}
+
 #[derive(Default, Eq, PartialEq, Debug, Clone, Copy)]
 pub struct Pos {
     pub row: usize,
@@ -240,3 +323,35 @@ impl RowModificationType {
     }
 }
 
+#[derive(Debug)]
+struct CursorData {
+    selection: Selection, // Vec when multicursor
+    last_column_index: usize,
+}
+
+impl CursorData {
+    #[inline]
+    #[allow(dead_code)]
+    pub fn set_cursor_pos(&mut self, pos: Pos) {
+        self.set_selection_save_col(Selection::single(pos));
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    pub fn set_cursor_pos_r_c(&mut self, row_index: usize, column_index: usize) {
+        self.set_selection_save_col(Selection::single_r_c(row_index, column_index));
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    pub fn set_cursor_range(&mut self, start: Pos, end: Pos) {
+        self.set_selection_save_col(Selection::range(start, end));
+    }
+
+    #[inline]
+    pub fn set_selection_save_col(&mut self, selection: Selection) {
+        self.selection = selection;
+        self.last_column_index = selection.get_cursor_pos().column;
+        debug_assert!(self.last_column_index <= 120, "{}", self.last_column_index);
+    }
+}
