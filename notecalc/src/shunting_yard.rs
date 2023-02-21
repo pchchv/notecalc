@@ -1331,3 +1331,1880 @@ impl ShuntingYard {
         );
     }
 }
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub mod tests {
+    use super::*;
+    use crate::borrow_checker_fighter::create_vars;
+    use crate::calc::{CalcResult, CalcResultType};
+    use crate::token_parser::tests::print_tokens_compare_error_and_panic;
+    use crate::token_parser::TokenParser;
+    use crate::units::units::{UnitOutput, Units};
+    use crate::{FunctionDef, Variable, Variables, MAX_LINE_COUNT, VARIABLE_ARR_SIZE};
+    use bumpalo::Bump;
+    use rust_decimal::prelude::*;
+
+    pub fn s_num<'text_ptr>(n: i64) -> Token<'text_ptr> {
+        Token {
+            ptr: &[],
+            typ: TokenType::NumberLiteral(n.into()),
+            has_error: false,
+        }
+    }
+
+    pub fn num<'text_ptr>(n: u64) -> Token<'text_ptr> {
+        Token {
+            ptr: &[],
+            typ: TokenType::NumberLiteral(n.into()),
+            has_error: false,
+        }
+    }
+
+    pub fn num_with_err<'text_ptr>(n: i64) -> Token<'text_ptr> {
+        Token {
+            ptr: &[],
+            typ: TokenType::NumberLiteral(n.into()),
+            has_error: true,
+        }
+    }
+
+    pub fn num_err<'text_ptr>() -> Token<'text_ptr> {
+        Token {
+            ptr: &[],
+            typ: TokenType::NumberErr,
+            has_error: true,
+        }
+    }
+
+    pub fn op<'text_ptr>(op_repr: OperatorTokenType) -> Token<'text_ptr> {
+        Token {
+            ptr: &[],
+            typ: TokenType::Operator(op_repr),
+            has_error: false,
+        }
+    }
+
+    pub fn op_err<'text_ptr>(op_repr: OperatorTokenType) -> Token<'text_ptr> {
+        Token {
+            ptr: &[],
+            typ: TokenType::Operator(op_repr),
+            has_error: true,
+        }
+    }
+
+    pub fn str<'text_ptr>(op_repr: &'static str) -> Token<'text_ptr> {
+        Token {
+            ptr: alloc_char_array_for(op_repr),
+            typ: TokenType::StringLiteral,
+            has_error: false,
+        }
+    }
+
+    pub fn header<'text_ptr>(op_repr: &'static str) -> Token<'text_ptr> {
+        Token {
+            ptr: alloc_char_array_for(op_repr),
+            typ: TokenType::Header,
+            has_error: false,
+        }
+    }
+
+    pub fn apply_to_prev_token_unit<'text_ptr>(op_repr: &'static str) -> Token<'text_ptr> {
+        Token {
+            ptr: alloc_char_array_for(op_repr),
+            typ: TokenType::Unit(UnitTokenType::ApplyToPrevToken, UnitOutput::new()),
+            has_error: false,
+        }
+    }
+
+    pub fn apply_to_prev_token_unit_with_err<'text_ptr>(op_repr: &'static str) -> Token<'text_ptr> {
+        Token {
+            ptr: alloc_char_array_for(op_repr),
+            typ: TokenType::Unit(UnitTokenType::ApplyToPrevToken, UnitOutput::new()),
+            has_error: true,
+        }
+    }
+
+    pub fn unit<'text_ptr>(op_repr: &str) -> Token<'text_ptr> {
+        Token {
+            ptr: alloc_char_array_for(op_repr),
+            typ: TokenType::Unit(UnitTokenType::StandInItself, UnitOutput::new()),
+            has_error: false,
+        }
+    }
+
+    fn alloc_char_array_for(op_repr: &str) -> &'static [char] {
+        let mut char_vec = Box::new(Vec::with_capacity(op_repr.len()));
+        for c in op_repr.chars() {
+            char_vec.push(c);
+        }
+        Box::leak(char_vec)
+    }
+
+    pub fn unit_with_err<'text_ptr>(op_repr: &str) -> Token<'text_ptr> {
+        Token {
+            ptr: alloc_char_array_for(op_repr),
+            typ: TokenType::Unit(UnitTokenType::StandInItself, UnitOutput::new()),
+            has_error: true,
+        }
+    }
+
+    pub fn var<'text_ptr>(op_repr: &'static str) -> Token<'text_ptr> {
+        Token {
+            ptr: alloc_char_array_for(op_repr),
+            typ: TokenType::Variable { var_index: 0 },
+            has_error: false,
+        }
+    }
+
+    pub fn line_ref<'text_ptr>(op_repr: &'static str) -> Token<'text_ptr> {
+        Token {
+            ptr: alloc_char_array_for(op_repr),
+            typ: TokenType::LineReference { var_index: 0 },
+            has_error: false,
+        }
+    }
+
+    pub fn numf<'text_ptr>(n: f64) -> Token<'text_ptr> {
+        Token {
+            ptr: &[],
+            typ: TokenType::NumberLiteral(Decimal::from_f64(n).unwrap()),
+            has_error: false,
+        }
+    }
+
+    pub fn compare_tokens(input: &str, expected_tokens: &[Token], actual_tokens: &[Token]) {
+        let mut differences = Vec::with_capacity(actual_tokens.len().max(expected_tokens.len()));
+        for (index, (actual_token, expected_token)) in
+            actual_tokens.iter().zip(expected_tokens.iter()).enumerate()
+        {
+            if actual_token.has_error != expected_token.has_error {
+                differences.push(index);
+            }
+            match (&expected_token.typ, &actual_token.typ) {
+                (
+                    TokenType::Unit(UnitTokenType::StandInItself, ..),
+                    TokenType::Unit(UnitTokenType::StandInItself, actual_unit),
+                )
+                | (
+                    TokenType::Unit(UnitTokenType::ApplyToPrevToken, ..),
+                    TokenType::Unit(UnitTokenType::ApplyToPrevToken, actual_unit),
+                ) => {
+                    if actual_unit.to_string() != expected_token.ptr.iter().collect::<String>() {
+                        differences.push(index);
+                    }
+                }
+                (TokenType::StringLiteral, TokenType::StringLiteral)
+                | (TokenType::Header, TokenType::Header)
+                | (TokenType::Variable { .. }, TokenType::Variable { .. })
+                | (TokenType::LineReference { .. }, TokenType::LineReference { .. }) => {
+                    if actual_token.ptr != expected_token.ptr {
+                        differences.push(index);
+                    }
+                }
+                _ => {
+                    if expected_token.typ != actual_token.typ {
+                        differences.push(index);
+                    }
+                }
+            }
+        }
+        if !differences.is_empty() || expected_tokens.len() != actual_tokens.len() {
+            print_tokens_compare_error_and_panic(
+                &format!("Text: {}\nActual Tokens\n", input),
+                actual_tokens,
+                &expected_tokens,
+                &differences,
+            );
+        }
+    }
+
+    pub fn do_shunting_yard_for_tests<'text_ptr, 'units, 'b>(
+        text: &[char],
+        units: &'units Units,
+        tokens: &mut Vec<Token<'text_ptr>>,
+        vars: &'b Variables,
+        allocator: &'text_ptr Bump,
+    ) -> Vec<ShuntingYardResult> {
+        let mut output = vec![];
+        let func_def_tmp: [Option<FunctionDef>; MAX_LINE_COUNT] = [None; MAX_LINE_COUNT];
+        TokenParser::parse_line(&text, vars, tokens, &units, 10, allocator, 0, &func_def_tmp);
+        let fds = [None; MAX_LINE_COUNT];
+        ShuntingYard::shunting_yard(tokens, &mut output, units, &fds);
+        return output;
+    }
+
+    fn test_output_vars(var_names: &[&'static [char]], text: &str, expected_tokens: &[Token]) {
+        let var_names: Vec<Option<Variable>> = (0..VARIABLE_ARR_SIZE)
+            .into_iter()
+            .map(|index| {
+                if let Some(var_name) = var_names.get(index) {
+                    Some(Variable {
+                        name: Box::from(*var_name),
+                        value: Err(()),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        println!("===================================================");
+        println!("{}", text);
+        let temp = text.chars().collect::<Vec<char>>();
+        let units = Units::new();
+        let mut tokens = vec![];
+        let output =
+            do_shunting_yard_for_tests(&temp, &units, &mut tokens, &var_names, &Bump::new());
+        compare_tokens(
+            text,
+            &expected_tokens,
+            output
+                .iter()
+                .map(|it| Token {
+                    ptr: &[],
+                    typ: it.typ.clone(),
+                    has_error: false,
+                })
+                .collect::<Vec<_>>()
+                .as_slice(),
+        );
+    }
+
+    fn test_output(text: &str, expected_tokens: &[Token]) {
+        test_output_vars(&[], text, expected_tokens);
+    }
+
+    fn test_tokens(text: &str, expected_tokens: &[Token]) {
+        println!("===================================================");
+        println!("{}", text);
+        let temp = text.chars().collect::<Vec<char>>();
+        let units = Units::new();
+        let mut tokens = vec![];
+        let arena = Bump::new();
+        let mut vars = create_vars();
+        vars[0] = Some(Variable {
+            name: Box::from(&['b', '0'][..]),
+            value: Ok(CalcResult::new(CalcResultType::Number(Decimal::zero()), 0)),
+        });
+        vars[1] = Some(Variable {
+            name: Box::from(&['&', '[', '1', ']'][..]),
+            value: Ok(CalcResult::new(CalcResultType::Number(Decimal::zero()), 0)),
+        });
+        let _ = do_shunting_yard_for_tests(&temp, &units, &mut tokens, &vars, &arena);
+        compare_tokens(text, &expected_tokens, &tokens);
+    }
+
+    #[test]
+    fn test1() {
+        test_output(
+            "1/2s",
+            &[
+                num(1),
+                num(2),
+                apply_to_prev_token_unit("s"),
+                op(OperatorTokenType::Div),
+            ],
+        );
+
+        test_output(
+            "30% - 10%",
+            &[
+                num(30),
+                op(OperatorTokenType::Perc),
+                num(10),
+                op(OperatorTokenType::Perc),
+                op(OperatorTokenType::Sub),
+            ],
+        );
+
+        test_output(
+            "10km/h * 45min",
+            &[
+                num(10),
+                apply_to_prev_token_unit("km / h"),
+                num(45),
+                apply_to_prev_token_unit("min"),
+                op(OperatorTokenType::Mult),
+            ],
+        );
+
+        test_output(
+            "10km/h * 45min * 12 km",
+            &[
+                num(10),
+                apply_to_prev_token_unit("km / h"),
+                num(45),
+                apply_to_prev_token_unit("min"),
+                op(OperatorTokenType::Mult),
+                num(12),
+                apply_to_prev_token_unit("km"),
+                op(OperatorTokenType::Mult),
+            ],
+        );
+
+        test_output(
+            "10km/h * 45min * 12 km in h",
+            &[
+                num(10),
+                apply_to_prev_token_unit("km / h"),
+                num(45),
+                apply_to_prev_token_unit("min"),
+                op(OperatorTokenType::Mult),
+                num(12),
+                apply_to_prev_token_unit("km"),
+                op(OperatorTokenType::Mult),
+                unit("h"),
+                op(OperatorTokenType::UnitConverter),
+            ],
+        );
+
+        test_output(
+            "space separated numbers 10 000 000 + 1 234",
+            &[num(10000000), num(1234), op(OperatorTokenType::Add)],
+        );
+
+        test_output(
+            "1 * (2+3)",
+            &[
+                num(1),
+                num(2),
+                num(3),
+                op(OperatorTokenType::Add),
+                op(OperatorTokenType::Mult),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_precedence() {
+        test_output(
+            "1+2*3",
+            &[
+                num(1),
+                num(2),
+                num(3),
+                op(OperatorTokenType::Mult),
+                op(OperatorTokenType::Add),
+            ],
+        );
+        test_output(
+            "1+2*3^4",
+            &[
+                num(1),
+                num(2),
+                num(3),
+                num(4),
+                op(OperatorTokenType::Pow),
+                op(OperatorTokenType::Mult),
+                op(OperatorTokenType::Add),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_binary_not() {
+        test_output("NOT(0b11)", &[num(0b11), op(OperatorTokenType::BinNot)]);
+    }
+
+    #[test]
+    fn test_shunting_matrices() {
+        test_output(
+            "[2] + 1",
+            &[
+                op(OperatorTokenType::StartLock),
+                num(2),
+                op(OperatorTokenType::Matrix {
+                    row_count: 1,
+                    col_count: 1,
+                }),
+                num(1),
+                op(OperatorTokenType::Add),
+            ],
+        );
+        test_output(
+            "[2, 3] + 1",
+            &[
+                op(OperatorTokenType::StartLock),
+                num(2),
+                num(3),
+                op(OperatorTokenType::Matrix {
+                    row_count: 1,
+                    col_count: 2,
+                }),
+                num(1),
+                op(OperatorTokenType::Add),
+            ],
+        );
+
+        test_output(
+            "[2, 3, 4; 5, 6, 7] + 1",
+            &[
+                op(OperatorTokenType::StartLock),
+                num(2),
+                num(3),
+                num(4),
+                num(5),
+                num(6),
+                num(7),
+                op(OperatorTokenType::Matrix {
+                    row_count: 2,
+                    col_count: 3,
+                }),
+                num(1),
+                op(OperatorTokenType::Add),
+            ],
+        );
+
+        // invalid, only 2 elements in the second row
+        test_output("[2, 3, 4; 5, 6] + 1", &[num(1)]);
+
+        // invalid
+        test_tokens(
+            "[[2, 3, 4], [5, 6, 7]] + 1",
+            &[
+                str("["),
+                str("["),
+                str("2"),
+                str(","),
+                str(" "),
+                str("3"),
+                str(","),
+                str(" "),
+                str("4"),
+                str("]"),
+                str(","),
+                str(" "),
+                op(OperatorTokenType::Matrix {
+                    row_count: 1,
+                    col_count: 3,
+                }),
+                num(5),
+                op(OperatorTokenType::Comma),
+                str(" "),
+                num(6),
+                op(OperatorTokenType::Comma),
+                str(" "),
+                num(7),
+                op(OperatorTokenType::BracketClose),
+                str("]"),
+                str(" "),
+                str("+"),
+                str(" "),
+                str("1"),
+            ],
+        );
+
+        test_output(
+            "[[2, 3, 4], [5, 6, 7]] + 1",
+            &[
+                op(OperatorTokenType::StartLock),
+                num(5),
+                num(6),
+                num(7),
+                op(OperatorTokenType::Matrix {
+                    row_count: 1,
+                    col_count: 3,
+                }),
+            ],
+        );
+
+        test_tokens(
+            "[1,2,3] *- [4;5;6]",
+            &[
+                str("["),
+                str("1"),
+                str(","),
+                str("2"),
+                str(","),
+                str("3"),
+                str("]"),
+                str(" "),
+                str("*"),
+                str("-"),
+                str(" "),
+                op(OperatorTokenType::Matrix {
+                    row_count: 3,
+                    col_count: 1,
+                }),
+                num(4),
+                op(OperatorTokenType::Semicolon),
+                num(5),
+                op(OperatorTokenType::Semicolon),
+                num(6),
+                op(OperatorTokenType::BracketClose),
+            ],
+        );
+
+        test_tokens(
+            "[1,2,3] * -[4;5;6]",
+            &[
+                op(OperatorTokenType::Matrix {
+                    row_count: 1,
+                    col_count: 3,
+                }),
+                num(1),
+                op(OperatorTokenType::Comma),
+                num(2),
+                op(OperatorTokenType::Comma),
+                num(3),
+                op(OperatorTokenType::BracketClose),
+                str(" "),
+                op(OperatorTokenType::Mult),
+                str(" "),
+                op(OperatorTokenType::Sub),
+                op(OperatorTokenType::Matrix {
+                    row_count: 3,
+                    col_count: 1,
+                }),
+                num(4),
+                op(OperatorTokenType::Semicolon),
+                num(5),
+                op(OperatorTokenType::Semicolon),
+                num(6),
+                op(OperatorTokenType::BracketClose),
+            ],
+        );
+
+        test_tokens(
+            "ez meg vala[41;2] [321,2] * [1;2] adasdsad",
+            &[
+                str("ez"),
+                str(" "),
+                str("meg"),
+                str(" "),
+                str("vala"),
+                str("["),
+                str("41"),
+                str(";"),
+                str("2"),
+                str("]"),
+                str(" "),
+                op(OperatorTokenType::Matrix {
+                    row_count: 1,
+                    col_count: 2,
+                }),
+                num(321),
+                op(OperatorTokenType::Comma),
+                num(2),
+                op(OperatorTokenType::BracketClose),
+                str(" "),
+                op(OperatorTokenType::Mult),
+                str(" "),
+                op(OperatorTokenType::Matrix {
+                    row_count: 2,
+                    col_count: 1,
+                }),
+                num(1),
+                op(OperatorTokenType::Semicolon),
+                num(2),
+                op(OperatorTokenType::BracketClose),
+                str(" "),
+                str("adasdsad"),
+            ],
+        );
+
+        test_output(
+            "[1,2,3]*[4;5;6]",
+            &[
+                op(OperatorTokenType::StartLock),
+                num(1),
+                num(2),
+                num(3),
+                op(OperatorTokenType::Matrix {
+                    row_count: 1,
+                    col_count: 3,
+                }),
+                op(OperatorTokenType::StartLock),
+                num(4),
+                num(5),
+                num(6),
+                op(OperatorTokenType::Matrix {
+                    row_count: 3,
+                    col_count: 1,
+                }),
+                op(OperatorTokenType::Mult),
+            ],
+        );
+
+        test_tokens(
+            "[1,2,3;4,5]",
+            &[
+                str("["),
+                str("1"),
+                str(","),
+                str("2"),
+                str(","),
+                str("3"),
+                str(";"),
+                str("4"),
+                str(","),
+                str("5"),
+                str("]"),
+            ],
+        );
+
+        test_output(
+            "[[2, 3, 4], [5, 6, 7]] + 1",
+            &[
+                op(OperatorTokenType::StartLock),
+                num(5),
+                num(6),
+                num(7),
+                op(OperatorTokenType::Matrix {
+                    row_count: 1,
+                    col_count: 3,
+                }),
+            ],
+        );
+
+        test_output(
+            "[2 + 3, 4 * 5;  6 / 7, 8^9]",
+            &[
+                op(OperatorTokenType::StartLock),
+                num(2),
+                num(3),
+                op(OperatorTokenType::Add),
+                num(4),
+                num(5),
+                op(OperatorTokenType::Mult),
+                num(6),
+                num(7),
+                op(OperatorTokenType::Div),
+                num(8),
+                num(9),
+                op(OperatorTokenType::Pow),
+                op(OperatorTokenType::Matrix {
+                    row_count: 2,
+                    col_count: 2,
+                }),
+            ],
+        );
+
+        test_output(
+            "1 + [2,]",
+            &[
+                num(1),
+                op(OperatorTokenType::StartLock),
+                num(2),
+                op(OperatorTokenType::Matrix {
+                    row_count: 1,
+                    col_count: 2,
+                }),
+                op(OperatorTokenType::Add),
+            ],
+        );
+        test_output(
+            "1 + [2,] 3*4",
+            &[num(3), num(4), op(OperatorTokenType::Mult)],
+        );
+
+        test(
+            "1 +* 2",
+            &[
+                num(1),
+                num(2),
+                op(OperatorTokenType::Mult),
+                op(OperatorTokenType::Add),
+            ],
+        );
+    }
+
+    #[test]
+    fn unary_operators() {
+        test_output("1-2", &[num(1), num(2), op(OperatorTokenType::Sub)]);
+        test_output(
+            "-1 + -2",
+            &[s_num(-1), s_num(-2), op(OperatorTokenType::Add)],
+        );
+        test_output("-1+-2", &[s_num(-1), s_num(-2), op(OperatorTokenType::Add)]);
+        test_output(
+            "-1 - -2",
+            &[s_num(-1), s_num(-2), op(OperatorTokenType::Sub)],
+        );
+        test_output("-1--2", &[s_num(-1), s_num(-2), op(OperatorTokenType::Sub)]);
+        test_output("+1-+2", &[num(1), num(2), op(OperatorTokenType::Sub)]);
+        test_output("+1++2", &[num(1), num(2), op(OperatorTokenType::Add)]);
+        test_output("2^-2", &[num(2), s_num(-2), op(OperatorTokenType::Pow)]);
+
+        test_output(
+            "-(1) - -(2)",
+            &[
+                num(1),
+                op(OperatorTokenType::UnaryMinus),
+                num(2),
+                op(OperatorTokenType::UnaryMinus),
+                op(OperatorTokenType::Sub),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_in_should_be_excluded_here() {
+        test_output(
+            "100 ft * lbf in (in*lbg)",
+            &[num(100), apply_to_prev_token_unit("ft lbf")],
+        );
+    }
+
+    #[test]
+    fn test2() {
+        test_output("", &[]);
+        test_output("2", &[num(2)]);
+
+        test_output(
+            "2m/3m",
+            &[
+                num(2),
+                apply_to_prev_token_unit("m"),
+                num(3),
+                apply_to_prev_token_unit("m"),
+                op(OperatorTokenType::Div),
+            ],
+        );
+
+        test_output(
+            "2/3m",
+            &[
+                num(2),
+                num(3),
+                apply_to_prev_token_unit("m"),
+                op(OperatorTokenType::Div),
+            ],
+        );
+
+        test_output(
+            "5km + 5cm",
+            &[
+                num(5),
+                apply_to_prev_token_unit("km"),
+                num(5),
+                apply_to_prev_token_unit("cm"),
+                op(OperatorTokenType::Add),
+            ],
+        );
+
+        test_output(
+            "100 ft * lbf in (in*lbf)",
+            &[
+                num(100),
+                apply_to_prev_token_unit("ft lbf"),
+                unit("in lbf"),
+                op(OperatorTokenType::UnitConverter),
+            ],
+        );
+
+        test_tokens(
+            "100 ft * lbf in (in*lbf)",
+            &[
+                num(100),
+                str(" "),
+                apply_to_prev_token_unit("ft lbf"),
+                str(" "),
+                op(OperatorTokenType::UnitConverter),
+                str(" "),
+                unit("in lbf"),
+            ],
+        );
+
+        test_tokens(
+            "1 Kib/s in b/s ",
+            &[
+                num(1),
+                str(" "),
+                apply_to_prev_token_unit("Kib / s"),
+                str(" "),
+                op(OperatorTokenType::UnitConverter),
+                str(" "),
+                unit("b / s"),
+                str(" "),
+            ],
+        );
+
+        test_output(
+            "100 ft * lbf in (in*lbg) 1 + 100",
+            &[num(100), apply_to_prev_token_unit("ft lbf")],
+        );
+        test_tokens(
+            "100 ft * lbf in (in*lbg) 1 + 100",
+            &[
+                num(100),
+                str(" "),
+                apply_to_prev_token_unit("ft lbf"),
+                str(" "),
+                str("in"),
+                str(" "),
+                str("("),
+                str("in"),
+                str("*"),
+                str("lbg"),
+                str(")"),
+                str(" "),
+                str("1"),
+                str(" "),
+                str("+"),
+                str(" "),
+                str("100"),
+            ],
+        );
+
+        test_output(
+            "12km/h*45s ^^",
+            &[
+                num(12),
+                apply_to_prev_token_unit("km / h"),
+                num(45),
+                apply_to_prev_token_unit("s"),
+                op(OperatorTokenType::Mult),
+            ],
+        );
+
+        test_output(
+            "12km/h * 45s ^^",
+            &[
+                num(12),
+                apply_to_prev_token_unit("km / h"),
+                num(45),
+                apply_to_prev_token_unit("s"),
+                op(OperatorTokenType::Mult),
+            ],
+        );
+        test_tokens(
+            "12km/h * 45s ^^",
+            &[
+                num(12),
+                apply_to_prev_token_unit("km / h"),
+                str(" "),
+                op(OperatorTokenType::Mult),
+                str(" "),
+                num(45),
+                apply_to_prev_token_unit("s"),
+                str(" "),
+                str("^"),
+                str("^"),
+            ],
+        );
+
+        test_output("1szer sem jött el + *megjegyzés 2 éve...", &[num(1)]);
+        test_tokens(
+            "1szer sem jött el + *megjegyzés 2 éve...",
+            &[
+                num(1),
+                str("szer"),
+                str(" "),
+                str("sem"),
+                str(" "),
+                str("jött"),
+                str(" "),
+                str("el"),
+                str(" "),
+                str("+"),
+                str(" "),
+                str("*"),
+                str("megjegyzés"),
+                str(" "),
+                str("2"),
+                str(" "),
+                str("éve..."),
+            ],
+        );
+
+        test_output(
+            "1+4szer sem jött el + *megjegyzés 2 éve...",
+            &[num(1), num(4), op(OperatorTokenType::Add)],
+        );
+        test_output(
+            "75 - 15 euróból kell adózni mert 15 EUR adómentes",
+            &[num(75), num(15), op(OperatorTokenType::Sub)],
+        );
+        test_output(
+            "15 EUR adómentes azaz 75-15 euróból kell adózni",
+            &[num(75), num(15), op(OperatorTokenType::Sub)],
+        );
+    }
+
+    #[test]
+    fn test_invalid_unit_in_conversion_target() {
+        test_tokens(
+            "100 ft * lbf in (in*lbg)",
+            &[
+                num(100),
+                str(" "),
+                apply_to_prev_token_unit("ft lbf"),
+                str(" "),
+                str("in"),
+                str(" "),
+                str("("),
+                str("in"),
+                str("*"),
+                str("lbg"),
+                str(")"),
+            ],
+        )
+    }
+
+    #[test]
+    fn invalid_inputs() {
+        test_output(
+            "1+4szer sem jött el + *megjegyzés 2 éve...",
+            &[num(1), num(4), op(OperatorTokenType::Add)],
+        );
+        test_output(
+            "1+4szer sem jött el + *megjegyzés 2éve...+ 3",
+            &[num(2), num(3), op(OperatorTokenType::Add)],
+        );
+        test_tokens(
+            "1+4szer sem jött el + *megjegyzés 2éve...+ 3",
+            &[
+                str("1"),
+                str("+"),
+                str("4"),
+                str("szer"),
+                str(" "),
+                str("sem"),
+                str(" "),
+                str("jött"),
+                str(" "),
+                str("el"),
+                str(" "),
+                str("+"),
+                str(" "),
+                str("*"),
+                str("megjegyzés"),
+                str(" "),
+                num(2),
+                str("éve..."),
+                op(OperatorTokenType::Add),
+                str(" "),
+                num(3),
+            ],
+        );
+    }
+
+    #[test]
+    fn variable_test() {
+        test_tokens(
+            "a = 12",
+            &[
+                str("a"),
+                str(" "),
+                op(OperatorTokenType::Assign),
+                str(" "),
+                num(12),
+            ],
+        );
+        test_output("a = 12", &[num(12), op(OperatorTokenType::Assign)]);
+
+        test_tokens(
+            "alfa béta = 12*4",
+            &[
+                str("alfa"),
+                str(" "),
+                str("béta"),
+                str(" "),
+                op(OperatorTokenType::Assign),
+                str(" "),
+                num(12),
+                op(OperatorTokenType::Mult),
+                num(4),
+            ],
+        );
+        test_output(
+            "alfa béta = 12*4",
+            &[
+                num(12),
+                num(4),
+                op(OperatorTokenType::Mult),
+                op(OperatorTokenType::Assign),
+            ],
+        );
+
+        test_tokens(
+            "var(12*4) = 13",
+            &[
+                str("var"),
+                str("("),
+                str("12"),
+                str("*"),
+                str("4"),
+                str(")"),
+                str(" "),
+                op(OperatorTokenType::Assign),
+                str(" "),
+                num(13),
+            ],
+        );
+        test_output("var(12*4) = 13", &[num(13), op(OperatorTokenType::Assign)]);
+    }
+
+    #[test]
+    fn invalid_variable_test() {
+        test_tokens("= 12", &[str("="), str(" "), num(12)]);
+        test_output("= 12", &[num(12)]);
+
+        test_tokens(" = 12", &[str(" "), str("="), str(" "), num(12)]);
+        test_output(" = 12", &[num(12)]);
+
+        test_tokens(
+            "a == 12",
+            &[str("a"), str(" "), str("="), str("="), str(" "), num(12)],
+        );
+        test_tokens(
+            "a = 12 =",
+            &[
+                str("a"),
+                str(" "),
+                str("="),
+                str(" "),
+                num(12),
+                str(" "),
+                str("="),
+            ],
+        );
+
+        test_tokens(
+            "12 = 13",
+            &[num(12), str(" "), str("="), str(" "), str("13")],
+        );
+    }
+
+    #[test]
+    fn simple_variables_are_reverted_to_str_in_case_of_error() {
+        test_tokens("100 b0", &[num(100), str(" "), str("b0")]);
+    }
+
+    #[test]
+    fn line_references_are_not_reverted_back_to_str() {
+        test_tokens("100 &[1]", &[num(100), str(" "), line_ref("&[1]")]);
+    }
+
+    #[test]
+    fn test_panic() {
+        test_tokens("()", &[str("("), str(")")]);
+
+        test_tokens(
+            "() Hz",
+            &[
+                op(OperatorTokenType::ParenOpen),
+                op(OperatorTokenType::ParenClose),
+                str(" "),
+                apply_to_prev_token_unit("Hz"),
+            ],
+        );
+    }
+
+    #[test]
+    fn variable_usage() {
+        test_output_vars(
+            &[&['b'], &['b', '0']],
+            "b0 + 100",
+            &[var(""), num(100), op(OperatorTokenType::Add)],
+        );
+
+        test_output("a1 + 12", &[num(12)]);
+
+        test_output_vars(&[&['b'], &['b', '0']], "b1 + 100", &[num(100)]);
+        test_output_vars(&[&['b'], &['b', '0']], "b", &[var("")]);
+    }
+
+    #[test]
+    fn test_var_reassignment() {
+        test_output_vars(
+            &[&['b'], &['b', '0']],
+            "b0 = 100",
+            &[num(100), op(OperatorTokenType::Assign)],
+        );
+    }
+
+    #[test]
+    fn test_fn_parsing() {
+        test_tokens(
+            "sin(60 degree)",
+            &[
+                op(OperatorTokenType::Fn {
+                    arg_count: 0,
+                    typ: FnType::Sin,
+                }),
+                op(OperatorTokenType::ParenOpen),
+                num(60),
+                str(" "),
+                apply_to_prev_token_unit("degree"),
+                op(OperatorTokenType::ParenClose),
+            ],
+        );
+        test_tokens(
+            "-sin(60 degree)",
+            &[
+                op(OperatorTokenType::Sub),
+                op(OperatorTokenType::Fn {
+                    arg_count: 0,
+                    typ: FnType::Sin,
+                }),
+                op(OperatorTokenType::ParenOpen),
+                num(60),
+                str(" "),
+                apply_to_prev_token_unit("degree"),
+                op(OperatorTokenType::ParenClose),
+            ],
+        );
+
+        test_tokens(
+            "[sin(60), cos(30)]",
+            &[
+                op(OperatorTokenType::Matrix {
+                    row_count: 1,
+                    col_count: 2,
+                }),
+                op(OperatorTokenType::Fn {
+                    arg_count: 0,
+                    typ: FnType::Sin,
+                }),
+                op(OperatorTokenType::ParenOpen),
+                num(60),
+                op(OperatorTokenType::ParenClose),
+                op(OperatorTokenType::Comma),
+                str(" "),
+                op(OperatorTokenType::Fn {
+                    arg_count: 0,
+                    typ: FnType::Cos,
+                }),
+                op(OperatorTokenType::ParenOpen),
+                num(30),
+                op(OperatorTokenType::ParenClose),
+                op(OperatorTokenType::BracketClose),
+            ],
+        );
+
+        test_tokens(
+            "sin([60, 30])",
+            &[
+                op(OperatorTokenType::Fn {
+                    arg_count: 0,
+                    typ: FnType::Sin,
+                }),
+                op(OperatorTokenType::ParenOpen),
+                op(OperatorTokenType::Matrix {
+                    row_count: 1,
+                    col_count: 2,
+                }),
+                num(60),
+                op(OperatorTokenType::Comma),
+                str(" "),
+                num(30),
+                op(OperatorTokenType::BracketClose),
+                op(OperatorTokenType::ParenClose),
+            ],
+        );
+
+        test_tokens(
+            "nth([5,6,7],1)",
+            &[
+                op(OperatorTokenType::Fn {
+                    arg_count: 0,
+                    typ: FnType::Nth,
+                }),
+                op(OperatorTokenType::ParenOpen),
+                op(OperatorTokenType::Matrix {
+                    row_count: 1,
+                    col_count: 3,
+                }),
+                num(5),
+                op(OperatorTokenType::Comma),
+                num(6),
+                op(OperatorTokenType::Comma),
+                num(7),
+                op(OperatorTokenType::BracketClose),
+                op(OperatorTokenType::Comma),
+                num(1),
+                op(OperatorTokenType::ParenClose),
+            ],
+        );
+
+        test_output_vars(
+            &[&['b']],
+            "nth(b, 1)",
+            &[
+                var(""),
+                num(1),
+                op(OperatorTokenType::Fn {
+                    arg_count: 2,
+                    typ: FnType::Nth,
+                }),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_missing_arg_nth_panic() {
+        test_tokens(
+            "nth(,[1])",
+            &[
+                op(OperatorTokenType::Fn {
+                    arg_count: 0,
+                    typ: FnType::Nth,
+                }),
+                op(OperatorTokenType::ParenOpen),
+                op(OperatorTokenType::Comma),
+                op(OperatorTokenType::Matrix {
+                    row_count: 1,
+                    col_count: 1,
+                }),
+                num(1),
+                op(OperatorTokenType::BracketClose),
+                op(OperatorTokenType::ParenClose),
+            ],
+        )
+    }
+
+    #[test]
+    fn test_empty_matrix() {
+        test_tokens(
+            "[]",
+            &[
+                op(OperatorTokenType::Matrix {
+                    row_count: 1,
+                    col_count: 1,
+                }),
+                op(OperatorTokenType::BracketClose),
+            ],
+        )
+    }
+
+    #[test]
+    fn test_fn_output() {
+        test_output(
+            "sin(60 degree)",
+            &[
+                num(60),
+                apply_to_prev_token_unit("degree"),
+                op(OperatorTokenType::Fn {
+                    arg_count: 1,
+                    typ: FnType::Sin,
+                }),
+            ],
+        );
+        test_output(
+            "-sin(60 degree)",
+            &[
+                num(60),
+                apply_to_prev_token_unit("degree"),
+                op(OperatorTokenType::Fn {
+                    arg_count: 1,
+                    typ: FnType::Sin,
+                }),
+                op(OperatorTokenType::UnaryMinus),
+            ],
+        );
+
+        test_output(
+            "[sin(60), cos(30)]",
+            &[
+                op(OperatorTokenType::StartLock),
+                num(60),
+                op(OperatorTokenType::Fn {
+                    arg_count: 1,
+                    typ: FnType::Sin,
+                }),
+                num(30),
+                op(OperatorTokenType::Fn {
+                    arg_count: 1,
+                    typ: FnType::Cos,
+                }),
+                op(OperatorTokenType::Matrix {
+                    row_count: 1,
+                    col_count: 2,
+                }),
+            ],
+        );
+
+        test_output(
+            "sin([60, 30])",
+            &[
+                op(OperatorTokenType::StartLock),
+                num(60),
+                num(30),
+                op(OperatorTokenType::Matrix {
+                    row_count: 1,
+                    col_count: 2,
+                }),
+                op(OperatorTokenType::Fn {
+                    arg_count: 1,
+                    typ: FnType::Sin,
+                }),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_fn_errors() {
+        test_tokens(
+            "nth([1,2]",
+            &[
+                str("nth"),
+                str("("),
+                str("["),
+                str("1"),
+                str(","),
+                str("2"),
+                str("]"),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_header() {
+        test_tokens("# header", &[header("# header")]);
+    }
+
+    #[test]
+    fn test_ignore_single_brackets() {
+        test_tokens("[", &[str("[")]);
+        test_output("[", &[]);
+        test_tokens("]", &[str("]")]);
+        test_output("]", &[]);
+        test_tokens("(", &[str("(")]);
+        test_output("(", &[]);
+        test_tokens(")", &[str(")")]);
+        test_output(")", &[]);
+        test_tokens("=", &[str("=")]);
+        test_output("=", &[]);
+    }
+
+    #[test]
+    fn test_unary_minus() {
+        test_output("-x -y", &[]);
+    }
+
+    #[test]
+    fn test_unit_in_denominator_tokens_with_parens() {
+        test_tokens(
+            "(12/year)",
+            &[
+                op(OperatorTokenType::ParenOpen),
+                num(12),
+                op(OperatorTokenType::Div),
+                unit("year"),
+                op(OperatorTokenType::ParenClose),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_that_pow_has_higher_precedence_than_unit() {
+        test_output(
+            "10^24kg",
+            &[
+                num(10),
+                num(24),
+                op(OperatorTokenType::Pow),
+                apply_to_prev_token_unit("kg"),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_multiple_equal_signs() {
+        test_output("z=1=2", &[num(1)]);
+    }
+
+    #[test]
+    fn test_multiple_equal_signs2() {
+        test_output(
+            "=(Blq9h/Oq=7y^$o[/kR]*$*oReyMo-M++]",
+            &[num(7), op(OperatorTokenType::Assign)],
+        );
+    }
+
+    #[test]
+    fn test_yl_parsing() {
+        test_output("909636Yl", &[num(909636), apply_to_prev_token_unit("Yl")]);
+    }
+
+    #[test]
+    fn test_fuzzing_issue1() {
+        test_output(
+            "90-/9b^72^4",
+            &[
+                num(9),
+                apply_to_prev_token_unit("b^72"),
+                num(4),
+                op(OperatorTokenType::Pow),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_ininin() {
+        test_output(
+            "12 in in in",
+            &[
+                num(12),
+                apply_to_prev_token_unit("in"),
+                unit("in"),
+                op(OperatorTokenType::UnitConverter),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_longer_texts2() {
+        test_output(
+            "transfer of around 1.587GB in about / 3 seconds",
+            &[
+                numf(1.587),
+                apply_to_prev_token_unit("GB"),
+                num(3),
+                apply_to_prev_token_unit("second"),
+                op(OperatorTokenType::Div),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_num_perc_on_what() {
+        test_output(
+            "41 is 17% on what",
+            &[
+                num(41),
+                num(17),
+                op(OperatorTokenType::Perc),
+                op(OperatorTokenType::PercentageIs),
+                op(OperatorTokenType::Percentage_Find_Base_From_Result_Increase_X),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_num_perc_on_what_tokens() {
+        test_tokens(
+            "41 is 17% on what",
+            &[
+                num(41),
+                str(" "),
+                op(OperatorTokenType::PercentageIs),
+                str(" "),
+                num(17),
+                op(OperatorTokenType::Perc),
+                str(" "),
+                op(OperatorTokenType::Percentage_Find_Base_From_Result_Increase_X),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_num_perc_on_what_paren_tokens() {
+        test_tokens(
+            "(41 is 17% on what)",
+            &[
+                op(OperatorTokenType::ParenOpen),
+                num(41),
+                str(" "),
+                op(OperatorTokenType::PercentageIs),
+                str(" "),
+                num(17),
+                op(OperatorTokenType::Perc),
+                str(" "),
+                op(OperatorTokenType::Percentage_Find_Base_From_Result_Increase_X),
+                op(OperatorTokenType::ParenClose),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_percentage_what_plus() {
+        test_output(
+            "what plus 17% is 41",
+            &[
+                num(17),
+                op(OperatorTokenType::Perc),
+                num(41),
+                op(OperatorTokenType::PercentageIs),
+                op(OperatorTokenType::Percentage_Find_Base_From_X_Icrease_Result),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_percentage_what_plus_tokens() {
+        test_tokens(
+            "what plus 17% is 41",
+            &[
+                op(OperatorTokenType::Percentage_Find_Base_From_X_Icrease_Result),
+                str(" "),
+                num(17),
+                op(OperatorTokenType::Perc),
+                str(" "),
+                op(OperatorTokenType::PercentageIs),
+                str(" "),
+                num(41),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_percentage_on_what_is() {
+        test_output(
+            "17% on what is 41",
+            &[
+                num(17),
+                op(OperatorTokenType::Perc),
+                num(41),
+                op(OperatorTokenType::Percentage_Find_Base_From_Icrease_X_Result),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_percentage_on_what_is_tokens() {
+        test_tokens(
+            "17% on what is 41",
+            &[
+                num(17),
+                op(OperatorTokenType::Perc),
+                str(" "),
+                op(OperatorTokenType::Percentage_Find_Base_From_Icrease_X_Result),
+                str(" "),
+                num(41),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_num_what_perc_on_num_tokens() {
+        test_tokens(
+            "41 is what % on 35",
+            &[
+                num(41),
+                str(" "),
+                op(OperatorTokenType::Percentage_Find_Incr_Rate_From_Result_X_Base),
+                str(" "),
+                num(35),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_num_what_perc_on_num() {
+        test_output(
+            "41 is what % on 35",
+            &[
+                num(41),
+                num(35),
+                op(OperatorTokenType::Percentage_Find_Incr_Rate_From_Result_X_Base),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_num_perc_off_what() {
+        test_output(
+            "41 is 17% off what",
+            &[
+                num(41),
+                num(17),
+                op(OperatorTokenType::Perc),
+                op(OperatorTokenType::PercentageIs),
+                op(OperatorTokenType::Percentage_Find_Base_From_Result_Decrease_X),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_num_perc_off_what_tokens() {
+        test_tokens(
+            "41 is 17% off what",
+            &[
+                num(41),
+                str(" "),
+                op(OperatorTokenType::PercentageIs),
+                str(" "),
+                num(17),
+                op(OperatorTokenType::Perc),
+                str(" "),
+                op(OperatorTokenType::Percentage_Find_Base_From_Result_Decrease_X),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_num_perc_off_what_paren_tokens() {
+        test_tokens(
+            "(41 is 17% off what)",
+            &[
+                op(OperatorTokenType::ParenOpen),
+                num(41),
+                str(" "),
+                op(OperatorTokenType::PercentageIs),
+                str(" "),
+                num(17),
+                op(OperatorTokenType::Perc),
+                str(" "),
+                op(OperatorTokenType::Percentage_Find_Base_From_Result_Decrease_X),
+                op(OperatorTokenType::ParenClose),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_percentage_what_minus() {
+        test_output(
+            "what minus 17% is 41",
+            &[
+                num(17),
+                op(OperatorTokenType::Perc),
+                num(41),
+                op(OperatorTokenType::PercentageIs),
+                op(OperatorTokenType::Percentage_Find_Base_From_X_Decrease_Result),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_percentage_what_minus_tokens() {
+        test_tokens(
+            "what minus 17% is 41",
+            &[
+                op(OperatorTokenType::Percentage_Find_Base_From_X_Decrease_Result),
+                str(" "),
+                num(17),
+                op(OperatorTokenType::Perc),
+                str(" "),
+                op(OperatorTokenType::PercentageIs),
+                str(" "),
+                num(41),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_percentage_off_what_is() {
+        test_output(
+            "17% off what is 41",
+            &[
+                num(17),
+                op(OperatorTokenType::Perc),
+                num(41),
+                op(OperatorTokenType::Percentage_Find_Base_From_Decrease_X_Result),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_percentage_off_what_is_tokens() {
+        test_tokens(
+            "17% off what is 41",
+            &[
+                num(17),
+                op(OperatorTokenType::Perc),
+                str(" "),
+                op(OperatorTokenType::Percentage_Find_Base_From_Decrease_X_Result),
+                str(" "),
+                num(41),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_num_what_perc_off_num_tokens() {
+        test_tokens(
+            "41 is what % off 35",
+            &[
+                num(41),
+                str(" "),
+                op(OperatorTokenType::Percentage_Find_Decr_Rate_From_Result_X_Base),
+                str(" "),
+                num(35),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_num_what_perc_off_num() {
+        test_output(
+            "41 is what % off 35",
+            &[
+                num(41),
+                num(35),
+                op(OperatorTokenType::Percentage_Find_Decr_Rate_From_Result_X_Base),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_percentage_find_rate_from_result_base() {
+        test_output(
+            "20 is what percent of 60",
+            &[
+                num(20),
+                num(60),
+                op(OperatorTokenType::Percentage_Find_Rate_From_Result_Base),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_percentage_find_rate_from_result_base_tokens() {
+        test_tokens(
+            "20 is what percent of 60",
+            &[
+                num(20),
+                str(" "),
+                op(OperatorTokenType::Percentage_Find_Rate_From_Result_Base),
+                str(" "),
+                num(60),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_percentage_find_base_from_result_rate() {
+        test_output(
+            "5 is 25% of what",
+            &[
+                num(5),
+                num(25),
+                op(OperatorTokenType::Perc),
+                op(OperatorTokenType::PercentageIs),
+                op(OperatorTokenType::Percentage_Find_Base_From_Result_Rate),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_shunting_percentage_find_base_from_result_rate_tokens() {
+        test_tokens(
+            "5 is 25% of what",
+            &[
+                num(5),
+                str(" "),
+                op(OperatorTokenType::PercentageIs),
+                str(" "),
+                num(25),
+                op(OperatorTokenType::Perc),
+                str(" "),
+                op(OperatorTokenType::Percentage_Find_Base_From_Result_Rate),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_unit_conversion_26() {
+        test_tokens(
+            "(256byte * 120) in MiB",
+            &[
+                op(OperatorTokenType::ParenOpen),
+                num(256),
+                apply_to_prev_token_unit("bytes"),
+                str(" "),
+                op(OperatorTokenType::Mult),
+                str(" "),
+                num(120),
+                op(OperatorTokenType::ParenClose),
+                str(" "),
+                op(OperatorTokenType::UnitConverter),
+                str(" "),
+                unit("MiB"),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_unit_conversion_26_output() {
+        test_output(
+            "(256byte * 120) in MiB",
+            &[
+                num(256),
+                apply_to_prev_token_unit("bytes"),
+                num(120),
+                op(OperatorTokenType::Mult),
+                unit("MiB"),
+                op(OperatorTokenType::UnitConverter),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_explicit_multipl_is_mandatory_before_units() {
+        test_tokens(
+            "2m^4kg/s^3",
+            &[
+                num(2),
+                apply_to_prev_token_unit("m^4"),
+                unit("kg / s^3"), // here, it must be unit for now, 'calc' can recognize that it is illegal and transform it to string
+            ],
+        );
+        // it is the accepted form
+        test_tokens(
+            "2m^4*kg/s^3",
+            &[num(2), apply_to_prev_token_unit("(m^4 kg) / s^3")],
+        );
+    }
+
+    #[test]
+    fn not_in_must_be_str_if_we_are_sure_it_cant_be_unit() {
+        test_tokens(
+            "12 m in",
+            &[
+                num(12),
+                str(" "),
+                apply_to_prev_token_unit("m"),
+                str(" "),
+                str("in"),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_bug_no_paren_around_100() {
+        test_output(
+            "1+e()^(100)",
+            &[
+                num(1),
+                op(OperatorTokenType::Fn {
+                    arg_count: 0,
+                    typ: FnType::E,
+                }),
+                num(100),
+                op(OperatorTokenType::Pow),
+                op(OperatorTokenType::Add),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_that_closing_paren_doesn_not_invalidate_valid_tokens_in_front_of_it() {
+        test_tokens(
+            ")5)t[Mr/(K)",
+            &[
+                str(")"),
+                num(5),
+                str(")"),
+                apply_to_prev_token_unit("t"),
+                str("["),
+                str("Mr"),
+                str("/"),
+                str("(K)"),
+            ],
+        );
+        test_output(")5)t[Mr/(K)", &[num(5), apply_to_prev_token_unit("t")]);
+    }
+
+    #[test]
+    fn test_illegal_unary_minus_is_not_added_to_the_output() {
+        test_output(
+            "[7*7]*9#8=-+",
+            &[
+                op(OperatorTokenType::StartLock),
+                num(7),
+                num(7),
+                op(OperatorTokenType::Mult),
+                op(OperatorTokenType::Matrix {
+                    row_count: 1,
+                    col_count: 1,
+                }),
+                num(9),
+                op(OperatorTokenType::Assign),
+            ],
+        );
+    }
+}
