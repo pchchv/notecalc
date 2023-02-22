@@ -28,8 +28,32 @@ use bumpalo::Bump;
 use helper::*;
 use std::time::Duration;
 
+pub mod borrow_checker_fighter;
+pub mod calc;
+pub mod constants;
 pub mod editor;
+pub mod functions;
+pub mod matrix;
+pub mod renderer;
+pub mod shunting_yard;
+pub mod test_common;
 pub mod token_parser;
+pub mod units;
+
+#[inline]
+fn _readonly_<T: ?Sized>(e: &mut T) -> &T {
+    return e;
+}
+
+#[inline]
+#[cfg(feature = "tracy")]
+fn tracy_span(name: &str, file: &str, line: u32) -> tracy_client::Span {
+    return tracy_client::Span::new(name, name, file, line, 100);
+}
+
+#[inline]
+#[cfg(not(feature = "tracy"))]
+fn tracy_span(_name: &str, _file: &str, _line: u32) -> () {}
 
 pub const SCROLLBAR_WIDTH: usize = 1;
 pub const MAX_FUNCTION_PARAM_COUNT: usize = 6;
@@ -1436,6 +1460,57 @@ impl MatrixEditing {
 
         render_x += 1;
         render_x
+    }
+}
+
+fn draw_line_refs_and_vars_referenced_from_cur_row<'b>(
+    editor_objs: &[EditorObject],
+    gr: &GlobalRenderData,
+    render_buckets: &mut RenderBuckets<'b>,
+) {
+    let mut color_index = 0;
+    let mut highlighted = BitFlag256::empty();
+    for editor_obj in editor_objs {
+        match editor_obj.typ {
+            EditorObjectType::LineReference { var_index }
+            | EditorObjectType::Variable { var_index } => {
+                if var_index >= SUM_VARIABLE_INDEX {
+                    continue;
+                }
+                let color = if highlighted.is_true(var_index) {
+                    continue;
+                } else {
+                    highlighted.set(var_index);
+                    let color = ACTIVE_LINE_REF_HIGHLIGHT_COLORS[color_index];
+                    color_index = if color_index < 8 { color_index + 1 } else { 0 };
+                    color
+                };
+                let defined_at = content_y(var_index);
+                if let Some(render_y) = gr.get_render_y(defined_at) {
+                    // render a rectangle on the *left gutter*
+                    render_buckets.custom_commands[Layer::BehindTextAboveCursor as usize]
+                        .push(OutputMessage::SetColor(color));
+                    render_buckets.custom_commands[Layer::BehindTextAboveCursor as usize].push(
+                        OutputMessage::RenderRectangle {
+                            x: 0,
+                            y: render_y,
+                            w: gr.left_gutter_width,
+                            h: gr.get_rendered_height(defined_at),
+                        },
+                    );
+                    // render a rectangle on the *right gutter*
+                    render_buckets.custom_commands[Layer::BehindTextAboveCursor as usize].push(
+                        OutputMessage::RenderRectangle {
+                            x: gr.result_gutter_x,
+                            y: render_y,
+                            w: RIGHT_GUTTER_WIDTH,
+                            h: gr.get_rendered_height(defined_at),
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
     }
 }
 
