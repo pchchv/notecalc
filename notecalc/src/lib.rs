@@ -1771,6 +1771,94 @@ pub fn pulse_changed_results(
     }
 }
 
+fn blend_color(src_color: u32, dst_color: u32, src_alpha: f32) -> u32 {
+    let dst_alpha = 1f32 - src_alpha;
+    let src_r = (src_color >> 24 & 0xFF) as f32;
+    let src_g = (src_color >> 16 & 0xFF) as f32;
+    let src_b = (src_color >> 8 & 0xFF) as f32;
+    let dst_r = (dst_color >> 24 & 0xFF) as f32;
+    let dst_g = (dst_color >> 16 & 0xFF) as f32;
+    let dst_b = (dst_color >> 8 & 0xFF) as f32;
+    let out_r = (src_r * src_alpha + dst_r * dst_alpha) as u32;
+    let out_g = (src_g * src_alpha + dst_g * dst_alpha) as u32;
+    let out_b = (src_b * src_alpha + dst_b * dst_alpha) as u32;
+
+    return (out_r << 24 | out_g << 16 | out_b << 8) | 0xFF;
+}
+
+fn highlight_current_line(
+    render_buckets: &mut RenderBuckets,
+    editor: &Editor<LineData>,
+    gr: &GlobalRenderData,
+    theme: &Theme,
+    cursor_inside_function_body: bool,
+) {
+    let cursor_row = editor.get_selection().get_cursor_pos().row;
+    if let Some(render_y) = gr.get_render_y(content_y(cursor_row)) {
+        let render_h = gr.get_rendered_height(content_y(cursor_row));
+        render_buckets.set_color(Layer::BehindTextCursor, theme.current_line_bg);
+        render_buckets.draw_rect(
+            Layer::BehindTextCursor,
+            0,
+            render_y,
+            gr.result_gutter_x + RIGHT_GUTTER_WIDTH + gr.current_result_panel_width,
+            render_h,
+        );
+        // render a blended rectangle to the right gutter as if the highlighting rectangle
+        // would blend into it (without it it hides the gutter and it is ugly).
+        let blended_color = blend_color(theme.result_gutter_bg, theme.current_line_bg, 0.5);
+        render_buckets.set_color(Layer::Text, blended_color);
+        render_buckets.draw_rect(
+            Layer::Text,
+            gr.result_gutter_x,
+            render_y,
+            RIGHT_GUTTER_WIDTH,
+            render_h,
+        );
+
+        if cursor_inside_function_body {
+            let blended_color = blend_color(theme.func_bg, theme.current_line_bg, 0.5);
+            render_buckets.set_color(Layer::BehindTextCursor, blended_color);
+            render_buckets.draw_rect(
+                Layer::BehindTextCursor,
+                gr.left_gutter_width,
+                render_y,
+                gr.current_editor_width,
+                render_h,
+            );
+        }
+    };
+}
+
+#[inline]
+fn highlight_line_ref_background<'text_ptr>(
+    editor_objs: &Vec<EditorObject>,
+    render_buckets: &mut RenderBuckets<'text_ptr>,
+    r: &PerLineRenderData,
+    gr: &GlobalRenderData,
+    theme: &Theme,
+) {
+    for editor_obj in editor_objs.iter() {
+        if matches!(editor_obj.typ, EditorObjectType::LineReference { .. }) {
+            let start_render_x = gr.left_gutter_width + editor_obj.rendered_x;
+            let allowed_end_x =
+                (start_render_x + editor_obj.rendered_w).min(gr.result_gutter_x - 1);
+            let width = allowed_end_x as isize - start_render_x as isize;
+            if width > 0 {
+                let vert_align_offset = (r.rendered_row_height - editor_obj.rendered_h) / 2;
+                render_buckets.set_color(Layer::BehindTextAboveCursor, theme.line_ref_bg);
+                render_buckets.draw_rect(
+                    Layer::BehindTextAboveCursor,
+                    start_render_x,
+                    editor_obj.rendered_y.add(vert_align_offset),
+                    width as usize,
+                    editor_obj.rendered_h,
+                );
+            }
+        }
+    }
+}
+
 fn render_results_into_buf_and_calc_len<'text_ptr>(
     units: &Units,
     results: &[LineResult],
