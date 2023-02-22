@@ -29,6 +29,7 @@ use bumpalo::Bump;
 use const_fn;
 use const_panic;
 use helper::*;
+use std::ops::Range;
 use std::time::Duration;
 use strum_macros::EnumDiscriminants;
 use symbol::sym::const_in_array_repeat_expressions;
@@ -65,6 +66,7 @@ pub const SCROLLBAR_WIDTH: usize = 1;
 pub const MAX_FUNCTION_PARAM_COUNT: usize = 6;
 pub const MAX_VAR_NAME_LEN: usize = 32;
 pub const EMPTY_FILE_DEFUALT_CONTENT: &str = "\n\n\n\n\n\n\n\n\n\n";
+pub const MAX_VISIBLE_HEADER_COUNT: usize = 16;
 
 pub const RENDERED_RESULT_PRECISION: usize = 28;
 pub const MAX_EDITOR_WIDTH: usize = 120;
@@ -1626,6 +1628,69 @@ impl ResultRender {
             }; 16],
             result_counts_in_regions: [0; MAX_VISIBLE_HEADER_COUNT],
         };
+    }
+}
+
+fn draw_cursor(
+    render_buckets: &mut RenderBuckets,
+    r: &PerLineRenderData,
+    gr: &GlobalRenderData,
+    editor: &Editor<LineData>,
+    matrix_editing: &Option<MatrixEditing>,
+    theme: &Theme,
+) {
+    let cursor_pos = editor.get_selection().get_cursor_pos();
+    if cursor_pos.row == r.editor_y.as_usize() {
+        render_buckets.set_color(Layer::AboveText, theme.cursor);
+        if editor.is_cursor_shown()
+            && matrix_editing.is_none()
+            && ((cursor_pos.column as isize + r.cursor_render_x_offset) as usize)
+                <= gr.current_editor_width
+        {
+            render_buckets.draw_char(
+                Layer::AboveText,
+                ((cursor_pos.column + gr.left_gutter_width) as isize + r.cursor_render_x_offset)
+                    as usize,
+                r.render_y.add(r.vert_align_offset),
+                '▏',
+            );
+        }
+    }
+}
+
+pub fn pulse_modified_line_references(
+    render_buckets: &mut RenderBuckets,
+    gr: &GlobalRenderData,
+    updated_line_ref_obj_indices: &[EditorObjId],
+    editor_objects: &EditorObjects,
+    theme: &Theme,
+) {
+    // Pulsing changed line references
+    for id in updated_line_ref_obj_indices {
+        for ed_obj in &editor_objects[id.content_index] {
+            match ed_obj {
+                EditorObject {
+                    typ: EditorObjectType::LineReference { var_index },
+                    rendered_x,
+                    rendered_y,
+                    rendered_w,
+                    rendered_h,
+                    ..
+                } if *var_index == id.var_index => {
+                    render_buckets.pulses.push(PulsingRectangle {
+                        x: gr.left_gutter_width + *rendered_x,
+                        y: *rendered_y,
+                        w: *rendered_w,
+                        h: *rendered_h,
+                        start_color: theme.change_result_pulse_start,
+                        end_color: theme.change_result_pulse_end,
+                        animation_time: Duration::from_millis(2000),
+                        repeat: false,
+                    });
+                }
+                _ => {}
+            }
+        }
     }
 }
 
