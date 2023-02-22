@@ -136,6 +136,29 @@ pub fn NOT(a: bool) -> bool {
     !a
 }
 
+pub enum Click {
+    Simple(Pos),
+    Drag(Pos),
+}
+
+fn get_function_index_for_line(
+    line_index: usize,
+    func_defs: &FunctionDefinitions,
+) -> Option<usize> {
+    for investigated_line_i in (0..=line_index).rev() {
+        if let Some(fd) = func_defs[investigated_line_i].as_ref() {
+            let func_end_index = fd.last_row_index.as_usize();
+            let line_index_is_part_of_that_func = line_index <= func_end_index;
+            return if line_index_is_part_of_that_func {
+                Some(investigated_line_i)
+            } else {
+                None
+            };
+        }
+    }
+    None
+}
+
 #[derive(Debug)]
 pub struct FunctionDef<'a> {
     pub func_name: &'a [char],
