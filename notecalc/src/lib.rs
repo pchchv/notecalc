@@ -1818,6 +1818,159 @@ fn render_results_into_buf_and_calc_len<'text_ptr>(
     .max(tmp.max_len);
 }
 
+fn create_render_commands_for_results_and_render_matrices<'text_ptr>(
+    tmp: &ResultRender,
+    units: &Units,
+    results: &[LineResult],
+    render_buckets: &mut RenderBuckets<'text_ptr>,
+    gr: &GlobalRenderData,
+    decimal_count: Option<usize>,
+    theme: &Theme,
+) -> usize {
+    let mut result_matrix_length = None;
+    let mut matrix_len = 0;
+    let result_buffer = unsafe { &RESULT_BUFFER };
+    let mut region_index = 0;
+    let mut result_count_in_this_region = tmp.result_counts_in_regions[0];
+    let mut max_lens = &tmp.max_lengths[0];
+
+    for result_tmp in tmp.result_ranges.iter() {
+        while result_count_in_this_region == 0 {
+            region_index += 1;
+            result_count_in_this_region = tmp.result_counts_in_regions[region_index];
+            max_lens = &tmp.max_lengths[region_index];
+        }
+        let rendered_row_height = gr.get_rendered_height(result_tmp.editor_y);
+        let render_y = gr.get_render_y(result_tmp.editor_y).expect("");
+
+        if let Some(result_range) = &result_tmp.buffer_ptr {
+            let lengths = &result_tmp.lengths;
+            let from = result_range.start;
+            let vert_align_offset = (rendered_row_height - 1) / 2;
+            let row = render_y.add(vert_align_offset);
+            enum ResultOffsetX {
+                Err,
+                Ok(usize),
+                TooLong,
+            }
+            let offset_x = if max_lens.int_part_len < lengths.int_part_len {
+                ResultOffsetX::Err
+            } else {
+                let offset_x = max_lens.int_part_len - lengths.int_part_len;
+                let sum_len =
+                    lengths.int_part_len + max_lens.frac_part_len + max_lens.unit_part_len;
+                if offset_x + sum_len > gr.current_result_panel_width {
+                    if sum_len > gr.current_result_panel_width {
+                        ResultOffsetX::TooLong
+                    } else {
+                        ResultOffsetX::Ok(gr.current_result_panel_width - sum_len)
+                    }
+                } else {
+                    ResultOffsetX::Ok(offset_x)
+                }
+            };
+            let x = gr.result_gutter_x
+                + RIGHT_GUTTER_WIDTH
+                + match offset_x {
+                    ResultOffsetX::Err => 0,
+                    ResultOffsetX::TooLong => 0,
+                    ResultOffsetX::Ok(n) => n,
+                };
+            let int_w = match offset_x {
+                ResultOffsetX::Err => 3,
+                _ => lengths.int_part_len,
+            };
+            render_buckets.ascii_texts.push(RenderAsciiTextMsg {
+                text: &result_buffer[from..from + int_w],
+                row,
+                column: x,
+            });
+            if lengths.frac_part_len > 0 {
+                let from = result_range.start + lengths.int_part_len;
+                render_buckets.ascii_texts.push(RenderAsciiTextMsg {
+                    text: &result_buffer[from..from + lengths.frac_part_len],
+                    row,
+                    column: x + lengths.int_part_len,
+                });
+            }
+            if lengths.unit_part_len > 0 {
+                let from = result_range.start + lengths.int_part_len + lengths.frac_part_len + 1;
+                // e.g. in case of 2 units mm and m, m should be 1 coordinates right
+                let offset_x = max_lens.unit_part_len - lengths.unit_part_len;
+                render_buckets.ascii_texts.push(RenderAsciiTextMsg {
+                    text: &result_buffer[from..result_range.end],
+                    row,
+                    column: gr.result_gutter_x
+                        + RIGHT_GUTTER_WIDTH
+                        + max_lens.int_part_len
+                        + max_lens.frac_part_len
+                        + 1
+                        + offset_x,
+                });
+            }
+            match offset_x {
+                ResultOffsetX::TooLong => {
+                    render_buckets.set_color(Layer::AboveText, theme.result_bg_color);
+                    render_buckets.draw_char(
+                        Layer::AboveText,
+                        gr.result_gutter_x + RIGHT_GUTTER_WIDTH + gr.current_result_panel_width - 1,
+                        row,
+                        '█',
+                    );
+                    render_buckets.set_color(Layer::AboveText, theme.cursor);
+                    render_buckets.draw_char(
+                        Layer::AboveText,
+                        gr.result_gutter_x + RIGHT_GUTTER_WIDTH + gr.current_result_panel_width - 1,
+                        row,
+                        '…',
+                    );
+                }
+                _ => {}
+            }
+            result_matrix_length = None;
+        } else {
+            match &results[result_tmp.editor_y.as_usize()] {
+                Ok(Some(CalcResult {
+                    typ: CalcResultType::Matrix(mat),
+                    ..
+                })) => {
+                    if result_matrix_length.is_none() {
+                        result_matrix_length = calc_consecutive_matrices_max_lengths(
+                            units,
+                            &results[result_tmp.editor_y.as_usize()..],
+                        );
+                    }
+                    let width = render_matrix_result(
+                        units,
+                        gr.result_gutter_x + RIGHT_GUTTER_WIDTH,
+                        render_y,
+                        gr.client_width,
+                        mat,
+                        render_buckets,
+                        result_matrix_length.as_ref(),
+                        gr.get_rendered_height(result_tmp.editor_y),
+                        decimal_count,
+                        theme.result_text,
+                    );
+                    if width > matrix_len {
+                        matrix_len = width;
+                    }
+                }
+                _ => {
+                    result_matrix_length = None;
+                }
+            }
+        }
+        result_count_in_this_region -= 1;
+        if result_count_in_this_region == 0 {
+            region_index += 1;
+            result_count_in_this_region = tmp.result_counts_in_regions[region_index];
+            max_lens = &tmp.max_lengths[region_index];
+        }
+    }
+    return matrix_len;
+}
+
 fn calc_consecutive_matrices_max_lengths(
     units: &Units,
     results: &[LineResult],
