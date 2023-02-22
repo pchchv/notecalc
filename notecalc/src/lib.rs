@@ -12,6 +12,10 @@
     clippy::all
 )]
 
+use crate::calc::{
+    add_op, evaluate_tokens, get_var_name_from_assignment, process_variable_assignment_or_line_ref,
+    CalcResult, CalcResultType, EvalErr, EvaluationResult, ShuntingYardResult,
+};
 use crate::editor::editor::{
     Editor, EditorInputEvent, InputModifiers, Pos, RowModificationType, Selection,
 };
@@ -26,6 +30,7 @@ pub mod token_parser;
 pub const SCROLLBAR_WIDTH: usize = 1;
 pub const MAX_FUNCTION_PARAM_COUNT: usize = 6;
 pub const MAX_VAR_NAME_LEN: usize = 32;
+pub const EMPTY_FILE_DEFUALT_CONTENT: &str = "\n\n\n\n\n\n\n\n\n\n";
 
 pub const RENDERED_RESULT_PRECISION: usize = 28;
 pub const MAX_EDITOR_WIDTH: usize = 120;
@@ -347,6 +352,16 @@ pub fn try_extract_function_def<'b>(
 
     return Some(fd);
 }
+
+#[derive(Debug, Clone)]
+pub struct Variable {
+    pub name: Box<[char]>,
+    pub value: Result<CalcResult, ()>,
+}
+
+pub type LineResult = Result<Option<CalcResult>, EvalErr>;
+pub type Variables = [Option<Variable>];
+pub type FunctionDefinitions<'a> = [Option<FunctionDef<'a>>];
 
 fn get_scroll_y_after_cursor_movement(
     prev_row: usize,
