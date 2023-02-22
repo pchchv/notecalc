@@ -908,6 +908,27 @@ pub struct PulsingRectangle {
     pub repeat: bool,
 }
 
+#[derive(Debug, PartialEq, Clone)]
+pub struct RenderUtf8TextMsg<'a> {
+    pub text: &'a [char],
+    pub row: CanvasY,
+    pub column: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderChar {
+    pub col: usize,
+    pub row: CanvasY,
+    pub char: char,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct RenderAsciiTextMsg<'a> {
+    pub text: &'a [u8],
+    pub row: CanvasY,
+    pub column: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct Variable {
     pub name: Box<[char]>,
