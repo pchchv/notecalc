@@ -1917,6 +1917,115 @@ fn draw_token<'text_ptr>(
     });
 }
 
+fn render_buckets_into(buckets: &RenderBuckets, canvas: &mut [[char; 256]]) {
+    fn write_char_slice(canvas: &mut [[char; 256]], row: CanvasY, col: usize, src: &[char]) {
+        let str = &mut canvas[row.as_usize()];
+        for (dst_char, src_char) in str[col..].iter_mut().zip(src.iter()) {
+            *dst_char = *src_char;
+        }
+    }
+
+    fn write_str(canvas: &mut [[char; 256]], row: CanvasY, col: usize, src: &str) {
+        let str = &mut canvas[row.as_usize()];
+        for (dst_char, src_char) in str[col..].iter_mut().zip(src.chars()) {
+            *dst_char = src_char;
+        }
+    }
+
+    fn write_char(canvas: &mut [[char; 256]], row: CanvasY, col: usize, char: char) {
+        let str = &mut canvas[row.as_usize()];
+        str[col] = char;
+    }
+
+    fn write_ascii(canvas: &mut [[char; 256]], row: CanvasY, col: usize, src: &[u8]) {
+        let str = &mut canvas[row.as_usize()];
+        for (dst_char, src_char) in str[col..].iter_mut().zip(src.iter()) {
+            *dst_char = *src_char as char;
+        }
+    }
+
+    fn write_command(canvas: &mut [[char; 256]], command: &OutputMessage) {
+        match command {
+            OutputMessage::RenderUtf8Text(text) => {
+                write_char_slice(canvas, text.row, text.column, text.text);
+            }
+            OutputMessage::SetStyle(..) => {}
+            OutputMessage::SetColor(..) => {}
+            OutputMessage::RenderRectangle { .. } => {}
+            OutputMessage::RenderChar(r) => {
+                write_char(canvas, r.row, r.col, r.char);
+            }
+            OutputMessage::RenderString(text) => {
+                write_str(canvas, text.row, text.column, &text.text);
+            }
+            OutputMessage::RenderAsciiText(text) => {
+                write_ascii(canvas, text.row, text.column, &text.text);
+            }
+            OutputMessage::FollowingTextCommandsAreHeaders { .. } => {}
+            OutputMessage::RenderUnderline { .. } => {}
+            OutputMessage::UpdatePulses => {}
+        }
+    }
+
+    for command in &buckets.custom_commands[Layer::BehindTextBehindCursor as usize] {
+        write_command(canvas, command);
+    }
+
+    for command in &buckets.custom_commands[Layer::BehindTextCursor as usize] {
+        write_command(canvas, command);
+    }
+    for command in &buckets.custom_commands[Layer::BehindTextAboveCursor as usize] {
+        write_command(canvas, command);
+    }
+
+    write_command(canvas, &OutputMessage::UpdatePulses);
+
+    for command in &buckets.utf8_texts {
+        write_char_slice(canvas, command.row, command.column, command.text);
+    }
+    for text in &buckets.ascii_texts {
+        write_ascii(canvas, text.row, text.column, text.text);
+    }
+    for command in &buckets.numbers {
+        write_char_slice(canvas, command.row, command.column, command.text);
+    }
+
+    for command in &buckets.number_errors {
+        write_char_slice(canvas, command.row, command.column, command.text);
+    }
+
+    for command in &buckets.units {
+        write_char_slice(canvas, command.row, command.column, command.text);
+    }
+
+    for command in &buckets.operators {
+        write_char_slice(canvas, command.row, command.column, command.text);
+    }
+    for command in &buckets.parenthesis {
+        write_char(canvas, command.row, command.col, command.char);
+    }
+
+    for command in &buckets.line_ref_results {
+        write_str(canvas, command.row, command.column, &command.text);
+    }
+
+    for command in &buckets.headers {
+        write_char_slice(canvas, command.row, command.column, command.text);
+    }
+
+    for command in &buckets.variable {
+        write_char_slice(canvas, command.row, command.column, command.text);
+    }
+
+    for command in &buckets.custom_commands[Layer::Text as usize] {
+        write_command(canvas, command);
+    }
+
+    for command in &buckets.custom_commands[Layer::AboveText as usize] {
+        write_command(canvas, command);
+    }
+}
+
 fn render_selection_and_its_sum<'text_ptr>(
     units: &Units,
     render_buckets: &mut RenderBuckets<'text_ptr>,
@@ -2259,4 +2368,22 @@ fn is_pos_inside_an_obj(editor_objects: &EditorObjects, pos: Pos) -> Option<&Edi
         }
     }
     return None;
+}
+
+fn sum_result(sum_var: &mut Variable, result: &CalcResult, sum_is_null: &mut bool) {
+    if *sum_is_null {
+        sum_var.value = Ok(result.clone());
+        *sum_is_null = false;
+    } else {
+        sum_var.value = match &sum_var.value {
+            Ok(current_sum) => {
+                if let Some(ok) = add_op(current_sum, &result) {
+                    Ok(ok)
+                } else {
+                    Err(())
+                }
+            }
+            _ => Err(()),
+        }
+    }
 }
