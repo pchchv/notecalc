@@ -1859,6 +1859,160 @@ fn highlight_line_ref_background<'text_ptr>(
     }
 }
 
+fn evaluate_selection(
+    units: &Units,
+    editor: &Editor<LineData>,
+    editor_content: &EditorContent<LineData>,
+    vars: &Variables,
+    func_defs: &FunctionDefinitions,
+    results: &[LineResult],
+    allocator: &Bump,
+    apptokens: &AppTokens,
+) -> Option<String> {
+    let sel = editor.get_selection();
+    let mut parsing_tokens = Vec::with_capacity(128);
+
+    if sel.start.row == sel.end.unwrap().row {
+        if let Some(selected_text) = Editor::get_selected_text_single_line(sel, &editor_content) {
+            if let Ok(Some(result)) = evaluate_text(
+                units,
+                selected_text,
+                vars,
+                func_defs,
+                &mut parsing_tokens,
+                sel.start.row,
+                allocator,
+                editor_content,
+                apptokens,
+            ) {
+                if result.there_was_operation {
+                    let result_str = render_result(
+                        &units,
+                        &result.result,
+                        &editor_content.get_data(sel.start.row).result_format,
+                        result.there_was_unit_conversion,
+                        Some(RENDERED_RESULT_PRECISION),
+                        true,
+                    );
+                    return Some(result_str);
+                }
+            }
+        }
+    } else {
+        let mut sum: Option<&CalcResult> = None;
+        // so sum can contain references to temp values
+        #[allow(unused_assignments)]
+        let mut tmp_sum = CalcResult::hack_empty();
+        for row_index in sel.get_first().row..=sel.get_second().row {
+            if let Err(..) = &results[row_index] {
+                return None;
+            } else if let Ok(Some(line_result)) = &results[row_index] {
+                if let Some(sum_r) = &sum {
+                    if let Some(add_result) = add_op(sum_r, &line_result) {
+                        tmp_sum = add_result;
+                        sum = Some(&tmp_sum);
+                    } else {
+                        return None; // don't show anything if can't add all the rows
+                    }
+                } else {
+                    sum = Some(&line_result);
+                }
+            }
+        }
+        if let Some(sum) = sum {
+            let result_str = render_result(
+                &units,
+                sum,
+                &editor_content.get_data(sel.start.row).result_format,
+                false,
+                Some(RENDERED_RESULT_PRECISION),
+                true,
+            );
+            return Some(result_str);
+        }
+    }
+    return None;
+}
+
+fn evaluate_text<'text_ptr>(
+    units: &Units,
+    text: &[char],
+    vars: &Variables,
+    func_defs: &FunctionDefinitions<'text_ptr>,
+    parsing_tokens: &mut Vec<Token<'text_ptr>>,
+    editor_y: usize,
+    allocator: &'text_ptr Bump,
+    editor_content: &EditorContent<LineData>,
+    apptokens: &AppTokens<'text_ptr>,
+) -> Result<Option<EvaluationResult>, EvalErr> {
+    let func_def_tmp: [Option<FunctionDef>; MAX_LINE_COUNT] = [None; MAX_LINE_COUNT];
+    TokenParser::parse_line(
+        text,
+        vars,
+        parsing_tokens,
+        &units,
+        editor_y,
+        allocator,
+        0,
+        &func_def_tmp,
+    );
+    let mut shunting_output_stack = Vec::with_capacity(4);
+    ShuntingYard::shunting_yard(parsing_tokens, &mut shunting_output_stack, units, func_defs);
+    let (_, result) = evaluate_tokens(
+        editor_y,
+        apptokens,
+        &vars,
+        func_defs,
+        units,
+        editor_content,
+        0,
+        None,
+    );
+    return result;
+}
+
+#[inline]
+fn underline_active_line_refs<'text_ptr>(
+    editor_objs: &[EditorObject],
+    render_buckets: &mut RenderBuckets<'text_ptr>,
+    gr: &GlobalRenderData,
+) {
+    let mut color_index = 0;
+    let mut colors: [Option<u32>; MAX_CLIENT_HEIGHT] = [None; MAX_CLIENT_HEIGHT];
+    for editor_obj in editor_objs.iter() {
+        match editor_obj.typ {
+            EditorObjectType::LineReference { var_index }
+            | EditorObjectType::Variable { var_index }
+                if var_index < SUM_VARIABLE_INDEX =>
+            {
+                let color = if let Some(color) = colors[var_index] {
+                    color
+                } else {
+                    let color = ACTIVE_LINE_REF_HIGHLIGHT_COLORS[color_index];
+                    colors[var_index] = Some(color);
+                    color_index = if color_index < 8 { color_index + 1 } else { 0 };
+                    color
+                };
+
+                let start_render_x = gr.left_gutter_width + editor_obj.rendered_x;
+                let allowed_end_x =
+                    (start_render_x + editor_obj.rendered_w).min(gr.result_gutter_x - 1);
+                let width = allowed_end_x as isize - start_render_x as isize;
+                if width > 0 {
+                    render_buckets.set_color(Layer::Text, color);
+                    render_buckets.draw_underline(
+                        Layer::Text,
+                        start_render_x,
+                        editor_obj.rendered_y.add(editor_obj.rendered_h - 1),
+                        width as usize,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn render_results_into_buf_and_calc_len<'text_ptr>(
     units: &Units,
     results: &[LineResult],
