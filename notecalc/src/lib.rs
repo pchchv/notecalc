@@ -23,10 +23,16 @@ use crate::editor::editor_content::EditorContent;
 use crate::functions::FnType;
 use crate::matrix::MatrixData;
 use crate::token_parser::{debug_print, OperatorTokenType, Token, TokenParser, TokenType};
+use crate::units::units::Units;
 
 use bumpalo::Bump;
+use const_fn;
+use const_panic;
 use helper::*;
 use std::time::Duration;
+use strum_macros::EnumDiscriminants;
+use symbol::sym::const_in_array_repeat_expressions;
+use tinyvec::ArrayVec;
 
 pub mod borrow_checker_fighter;
 pub mod calc;
@@ -1571,6 +1577,56 @@ pub enum MouseHoverType {
 pub struct EditorObjId {
     content_index: ContentIndex,
     var_index: usize,
+}
+
+#[derive(Debug, Default)]
+pub struct ResultLengths {
+    int_part_len: usize,
+    frac_part_len: usize,
+    unit_part_len: usize,
+}
+
+impl ResultLengths {
+    fn set_max(&mut self, other: &ResultLengths) {
+        if self.int_part_len < other.int_part_len {
+            self.int_part_len = other.int_part_len;
+        }
+        if self.frac_part_len < other.frac_part_len {
+            self.frac_part_len = other.frac_part_len;
+        }
+        if self.unit_part_len < other.unit_part_len {
+            self.unit_part_len = other.unit_part_len;
+        }
+    }
+}
+
+#[derive(Default)]
+struct ResultTmp {
+    buffer_ptr: Option<Range<usize>>,
+    editor_y: ContentIndex,
+    lengths: ResultLengths,
+}
+
+struct ResultRender {
+    result_ranges: ArrayVec<[ResultTmp; MAX_CLIENT_HEIGHT]>,
+    max_len: usize,
+    max_lengths: [ResultLengths; MAX_VISIBLE_HEADER_COUNT],
+    result_counts_in_regions: [usize; MAX_VISIBLE_HEADER_COUNT],
+}
+
+impl ResultRender {
+    pub fn new(vec: ArrayVec<[ResultTmp; MAX_CLIENT_HEIGHT]>) -> ResultRender {
+        return ResultRender {
+            result_ranges: vec,
+            max_len: 0,
+            max_lengths: [ResultLengths {
+                int_part_len: 0,
+                frac_part_len: 0,
+                unit_part_len: 0,
+            }; 16],
+            result_counts_in_regions: [0; MAX_VISIBLE_HEADER_COUNT],
+        };
+    }
 }
 
 pub fn end_matrix_editing(
