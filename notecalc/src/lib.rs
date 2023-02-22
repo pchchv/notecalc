@@ -22,6 +22,7 @@ use crate::editor::editor::{
 use crate::editor::editor_content::EditorContent;
 use crate::functions::FnType;
 use crate::matrix::MatrixData;
+use crate::renderer::{get_int_frac_part_len, render_result, render_result_into};
 use crate::token_parser::{debug_print, OperatorTokenType, Token, TokenParser, TokenType};
 use crate::units::units::Units;
 
@@ -128,6 +129,9 @@ const AUTOCOMPLETION_CONSTS: [AutoCompletionConst; 5] = [
         relative_new_cursor_pos: None,
     },
 ];
+
+static mut RESULT_BUFFER: [u8; 2048] = [0; 2048];
+
 #[allow(dead_code)]
 pub struct Theme {
     pub bg: u32,
@@ -1812,6 +1816,64 @@ fn render_results_into_buf_and_calc_len<'text_ptr>(
             0
         })
     .max(tmp.max_len);
+}
+
+fn calc_consecutive_matrices_max_lengths(
+    units: &Units,
+    results: &[LineResult],
+) -> Option<ResultLengths> {
+    let mut max_lengths: Option<ResultLengths> = None;
+    for result in results.iter() {
+        match result {
+            Ok(Some(CalcResult {
+                typ: CalcResultType::Matrix(mat),
+                ..
+            })) => {
+                let lengths = calc_matrix_max_lengths(units, mat);
+                if let Some(max_lengths) = &mut max_lengths {
+                    max_lengths.set_max(&lengths);
+                } else {
+                    max_lengths = Some(lengths);
+                }
+            }
+            _ => {
+                break;
+            }
+        }
+    }
+    return max_lengths;
+}
+
+fn calc_matrix_max_lengths(units: &Units, mat: &MatrixData) -> ResultLengths {
+    let cells_strs = {
+        let mut tokens_per_cell: ArrayVec<[String; 32]> = ArrayVec::new();
+
+        for cell in mat.cells.iter() {
+            let result_str = render_result(
+                units,
+                cell,
+                &ResultFormat::Dec,
+                false,
+                Some(RENDERED_RESULT_PRECISION),
+                true,
+            );
+            tokens_per_cell.push(result_str);
+        }
+        tokens_per_cell
+    };
+    let max_lengths = {
+        let mut max_lengths = ResultLengths {
+            int_part_len: 0,
+            frac_part_len: 0,
+            unit_part_len: 0,
+        };
+        for cell_str in &cells_strs {
+            let lengths = get_int_frac_part_len(cell_str);
+            max_lengths.set_max(&lengths);
+        }
+        max_lengths
+    };
+    return max_lengths;
 }
 
 fn draw_token<'text_ptr>(
