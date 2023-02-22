@@ -1544,6 +1544,35 @@ pub type LineResult = Result<Option<CalcResult>, EvalErr>;
 pub type Variables = [Option<Variable>];
 pub type FunctionDefinitions<'a> = [Option<FunctionDef<'a>>];
 
+#[derive(Debug)]
+pub struct Tokens<'a> {
+    pub tokens: Vec<Token<'a>>,
+    pub shunting_output_stack: Vec<ShuntingYardResult>,
+}
+
+pub enum MouseClickType {
+    ClickedInEditor,
+    ClickedInScrollBar {
+        original_click_y: CanvasY,
+        original_scroll_y: usize,
+    },
+    RightGutterIsDragged,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum MouseHoverType {
+    Normal,
+    Scrollbar,
+    RightGutter,
+    Result,
+}
+
+#[derive(Debug)]
+pub struct EditorObjId {
+    content_index: ContentIndex,
+    var_index: usize,
+}
+
 pub fn end_matrix_editing(
     matrix_editing: &mut Option<MatrixEditing>,
     editor: &mut Editor<LineData>,
