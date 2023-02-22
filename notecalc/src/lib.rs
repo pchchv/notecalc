@@ -295,3 +295,39 @@ pub fn try_extract_function_def<'b>(
 
     return Some(fd);
 }
+
+fn set_editor_and_result_panel_widths(
+    client_width: usize,
+    result_panel_width_percent: usize,
+    gr: &mut GlobalRenderData,
+) {
+    let mut result_gutter_x: isize =
+        (client_width * (100 - result_panel_width_percent) / 100) as isize;
+    {
+        // the editor pushes the gutter to right
+        let editor_width =
+            (result_gutter_x - SCROLLBAR_WIDTH as isize - LEFT_GUTTER_MIN_WIDTH as isize) - 1;
+        let diff = gr.longest_visible_editor_line_len as isize - editor_width;
+        if diff > 0 {
+            result_gutter_x += diff;
+        }
+    }
+    {
+        // the result panel pushes the gutter to left, with higher priority
+        let result_panel_w: isize =
+            client_width as isize - result_gutter_x - RIGHT_GUTTER_WIDTH as isize;
+        let diff = gr.longest_visible_result_len as isize - result_panel_w;
+        if diff > 0 {
+            result_gutter_x -= diff;
+        }
+    }
+    // result panel width has a minimum required width
+    let result_panel_w = client_width as isize - result_gutter_x - RIGHT_GUTTER_WIDTH as isize;
+    let result_gutter_x = (client_width as isize - result_panel_w - RIGHT_GUTTER_WIDTH as isize)
+        .max(MIN_RESULT_PANEL_WIDTH as isize) as usize;
+    gr.set_result_gutter_x(result_gutter_x);
+}
+pub fn default_result_gutter_x(client_width: usize) -> usize {
+    (client_width * (100 - DEFAULT_RESULT_PANEL_WIDTH_PERCENT) / 100)
+        .max(LEFT_GUTTER_MIN_WIDTH + SCROLLBAR_WIDTH)
+}
