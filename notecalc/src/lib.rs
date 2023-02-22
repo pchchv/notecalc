@@ -1119,6 +1119,28 @@ impl<'a> RenderBuckets<'a> {
     }
 }
 
+#[derive(Eq, PartialEq, Copy, Clone, Debug)]
+pub enum ResultFormat {
+    Bin,
+    Dec,
+    Hex,
+}
+
+#[derive(Clone, Debug)]
+pub struct LineData {
+    pub line_id: usize,
+    result_format: ResultFormat,
+}
+
+impl Default for LineData {
+    fn default() -> Self {
+        LineData {
+            line_id: 0,
+            result_format: ResultFormat::Dec,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Variable {
     pub name: Box<[char]>,
