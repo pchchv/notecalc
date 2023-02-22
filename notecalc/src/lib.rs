@@ -29,6 +29,7 @@ use bumpalo::Bump;
 use const_fn;
 use const_panic;
 use helper::*;
+use std::io::Cursor;
 use std::ops::Range;
 use std::time::Duration;
 use strum_macros::EnumDiscriminants;
@@ -1692,6 +1693,228 @@ pub fn pulse_modified_line_references(
             }
         }
     }
+}
+
+fn render_results_into_buf_and_calc_len<'text_ptr>(
+    units: &Units,
+    results: &[LineResult],
+    tmp: &mut ResultRender,
+    editor_content: &EditorContent<LineData>,
+    gr: &GlobalRenderData,
+    decimal_count: Option<usize>,
+) {
+    let mut result_buffer_index = 0;
+    let result_buffer = unsafe { &mut RESULT_BUFFER };
+    // calc max length and render results into buffer
+    let mut region_index = 0;
+    let mut region_count_offset = 0;
+    for (editor_y, result) in results.iter().enumerate() {
+        let editor_y = content_y(editor_y);
+        let render_y = if let Some(render_y) = gr.get_render_y(editor_y) {
+            render_y
+        } else {
+            continue;
+        };
+        if !gr.is_visible(editor_y) {
+            continue;
+        } else if editor_y.as_usize() >= editor_content.line_count() {
+            break;
+        }
+        if render_y.as_usize() != 0 && editor_content.get_char(editor_y.as_usize(), 0) == '#' {
+            let max_lens = &tmp.max_lengths[region_index];
+            tmp.max_len = (max_lens.int_part_len
+                + max_lens.frac_part_len
+                + if max_lens.unit_part_len > 0 {
+                    max_lens.unit_part_len + 1
+                } else {
+                    0
+                })
+            .max(tmp.max_len);
+            tmp.result_counts_in_regions[region_index] =
+                tmp.result_ranges.len() - region_count_offset;
+            region_count_offset = tmp.result_ranges.len();
+            if region_index < MAX_VISIBLE_HEADER_COUNT - 1 {
+                region_index += 1;
+            }
+            continue;
+        }
+
+        if let Err(..) = result {
+            result_buffer[result_buffer_index] = b'E';
+            result_buffer[result_buffer_index + 1] = b'r';
+            result_buffer[result_buffer_index + 2] = b'r';
+            tmp.result_ranges.push(ResultTmp {
+                buffer_ptr: Some(result_buffer_index..result_buffer_index + 3),
+                editor_y,
+                lengths: ResultLengths {
+                    int_part_len: 999,
+                    frac_part_len: 0,
+                    unit_part_len: 0,
+                },
+            });
+            result_buffer_index += 3;
+        } else if let Ok(Some(result)) = result {
+            match &result.typ {
+                CalcResultType::Matrix(_mat) => {
+                    tmp.result_ranges.push(ResultTmp {
+                        buffer_ptr: None,
+                        editor_y,
+                        lengths: ResultLengths {
+                            int_part_len: 0,
+                            frac_part_len: 0,
+                            unit_part_len: 0,
+                        },
+                    });
+                }
+                _ => {
+                    let start = result_buffer_index;
+                    let mut c = Cursor::new(&mut result_buffer[start..]);
+                    let lens = render_result_into(
+                        &units,
+                        &result,
+                        &editor_content.get_data(editor_y.as_usize()).result_format,
+                        false,
+                        &mut c,
+                        decimal_count,
+                        true,
+                    );
+                    let len = c.position() as usize;
+                    let range = start..start + len;
+                    tmp.max_lengths[region_index].set_max(&lens);
+                    tmp.result_ranges.push(ResultTmp {
+                        buffer_ptr: Some(range),
+                        editor_y,
+                        lengths: lens,
+                    });
+                    result_buffer_index += len;
+                }
+            };
+        } else {
+            tmp.result_ranges.push(ResultTmp {
+                buffer_ptr: None,
+                editor_y,
+                lengths: ResultLengths {
+                    int_part_len: 0,
+                    frac_part_len: 0,
+                    unit_part_len: 0,
+                },
+            });
+        }
+    }
+    result_buffer[result_buffer_index] = 0; // tests depend on it
+
+    tmp.result_counts_in_regions[region_index] = tmp.result_ranges.len() - region_count_offset;
+    tmp.max_len = (tmp.max_lengths[region_index].int_part_len
+        + tmp.max_lengths[region_index].frac_part_len
+        + if tmp.max_lengths[region_index].unit_part_len > 0 {
+            tmp.max_lengths[region_index].unit_part_len + 1
+        } else {
+            0
+        })
+    .max(tmp.max_len);
+}
+
+fn draw_token<'text_ptr>(
+    token: &Token<'text_ptr>,
+    render_x: usize,
+    render_y: CanvasY,
+    current_editor_width: usize,
+    left_gutter_width: usize,
+    render_buckets: &mut RenderBuckets<'text_ptr>,
+    is_bold: bool,
+    theme: &Theme,
+) {
+    let dst = if token.has_error() {
+        &mut render_buckets.number_errors
+    } else {
+        match &token.typ {
+            TokenType::StringLiteral => &mut render_buckets.utf8_texts,
+            TokenType::Header => &mut render_buckets.headers,
+            TokenType::Variable { .. } => &mut render_buckets.variable,
+            TokenType::LineReference { .. } => &mut render_buckets.variable,
+            TokenType::NumberLiteral(_) => &mut render_buckets.numbers,
+            TokenType::NumberErr => &mut render_buckets.number_errors,
+            TokenType::Unit(_, _) => &mut render_buckets.units,
+            TokenType::Operator(OperatorTokenType::ParenClose) => {
+                if current_editor_width <= render_x {
+                    return;
+                }
+                if is_bold {
+                    render_buckets.set_color(Layer::Text, theme.line_ref_bg);
+                    render_buckets.draw_rect(
+                        Layer::Text,
+                        render_x + left_gutter_width,
+                        render_y,
+                        1,
+                        1,
+                    );
+
+                    render_buckets.set_color(Layer::Text, theme.parenthesis);
+
+                    let b = &mut render_buckets.custom_commands[Layer::Text as usize];
+                    b.push(OutputMessage::FollowingTextCommandsAreHeaders(true));
+                    b.push(OutputMessage::RenderChar(RenderChar {
+                        col: render_x + left_gutter_width,
+                        row: render_y,
+                        char: ')',
+                    }));
+                    b.push(OutputMessage::FollowingTextCommandsAreHeaders(false));
+                } else {
+                    render_buckets.parenthesis.push(RenderChar {
+                        col: render_x + left_gutter_width,
+                        row: render_y,
+                        char: ')',
+                    });
+                }
+                return;
+            }
+            TokenType::Operator(OperatorTokenType::ParenOpen) => {
+                if current_editor_width <= render_x {
+                    return;
+                }
+                if is_bold {
+                    render_buckets.set_color(Layer::Text, theme.line_ref_bg);
+                    render_buckets.draw_rect(
+                        Layer::Text,
+                        render_x + left_gutter_width,
+                        render_y,
+                        1,
+                        1,
+                    );
+                    render_buckets.set_color(Layer::Text, theme.parenthesis);
+
+                    render_buckets.custom_commands[Layer::Text as usize]
+                        .push(OutputMessage::FollowingTextCommandsAreHeaders(true));
+                    &mut render_buckets.custom_commands[Layer::Text as usize].push(
+                        OutputMessage::RenderChar(RenderChar {
+                            col: render_x + left_gutter_width,
+                            row: render_y,
+                            char: '(',
+                        }),
+                    );
+                    render_buckets.custom_commands[Layer::Text as usize]
+                        .push(OutputMessage::FollowingTextCommandsAreHeaders(false));
+                } else {
+                    &mut render_buckets.parenthesis.push(RenderChar {
+                        col: render_x + left_gutter_width,
+                        row: render_y,
+                        char: '(',
+                    });
+                }
+                return;
+            }
+            TokenType::Operator(_) => &mut render_buckets.operators,
+        }
+    };
+    let text_len = token
+        .ptr
+        .len()
+        .min((current_editor_width as isize - render_x as isize).max(0) as usize);
+    dst.push(RenderUtf8TextMsg {
+        text: &token.ptr[0..text_len],
+        row: render_y,
+        column: render_x + left_gutter_width,
+    });
 }
 
 fn render_selection_and_its_sum<'text_ptr>(
