@@ -1699,6 +1699,78 @@ pub fn pulse_modified_line_references(
     }
 }
 
+pub fn pulse_editor_objs_referencing_current_line(
+    render_buckets: &mut RenderBuckets,
+    gr: &GlobalRenderData,
+    editor_objs_referencing_current_line: &[EditorObjId],
+    editor_objects: &EditorObjects,
+    theme: &Theme,
+) {
+    for id in editor_objs_referencing_current_line {
+        for ed_obj in &editor_objects[id.content_index] {
+            match ed_obj {
+                EditorObject {
+                    typ: EditorObjectType::LineReference { var_index },
+                    ..
+                }
+                | EditorObject {
+                    typ: EditorObjectType::Variable { var_index },
+                    ..
+                } if *var_index == id.var_index => {
+                    let end_editor_x = gr.current_editor_width + gr.left_gutter_width + 1;
+                    if gr.is_visible(ed_obj.row) {
+                        let rendered_row_height = gr.get_rendered_height(ed_obj.row);
+                        let vert_align_offset = (rendered_row_height - ed_obj.rendered_h) / 2;
+                        let obj_start_x =
+                            (gr.left_gutter_width + ed_obj.rendered_x).min(end_editor_x - 1);
+                        let obj_end_x = (obj_start_x + ed_obj.rendered_w).min(end_editor_x);
+                        render_buckets.pulses.push(PulsingRectangle {
+                            x: obj_start_x,
+                            y: ed_obj.rendered_y.add(vert_align_offset),
+                            w: obj_end_x - obj_start_x,
+                            h: ed_obj.rendered_h,
+                            start_color: theme.reference_pulse_start,
+                            end_color: theme.reference_pulse_end,
+                            animation_time: Duration::from_millis(1000),
+                            repeat: true,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+pub fn pulse_changed_results(
+    render_buckets: &mut RenderBuckets,
+    gr: &GlobalRenderData,
+    longest_rendered_result_len: usize,
+    result_change_flag: &BitFlag256,
+    theme: &Theme,
+) {
+    if gr.get_render_y(content_y(0)).is_none() {
+        // there were no render yet
+        return;
+    }
+    for i in 0..MAX_LINE_COUNT {
+        if result_change_flag.is_true(i) {
+            if let Some(render_y) = gr.get_render_y(content_y(i)) {
+                render_buckets.pulses.push(PulsingRectangle {
+                    x: gr.result_gutter_x + RIGHT_GUTTER_WIDTH,
+                    y: render_y,
+                    w: longest_rendered_result_len,
+                    h: gr.get_rendered_height(content_y(i)),
+                    start_color: theme.change_result_pulse_start,
+                    end_color: theme.change_result_pulse_end,
+                    animation_time: Duration::from_millis(1000),
+                    repeat: false,
+                });
+            }
+        }
+    }
+}
+
 fn render_results_into_buf_and_calc_len<'text_ptr>(
     units: &Units,
     results: &[LineResult],
