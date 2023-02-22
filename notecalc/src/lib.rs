@@ -949,6 +949,40 @@ pub enum Layer {
     AboveText,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TextStyle {
+    Normal,
+    Bold,
+    Underline,
+    Italy,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, EnumDiscriminants, PartialEq)]
+#[strum_discriminants(name(OutputMessageCommandId))]
+pub enum OutputMessage<'a> {
+    SetStyle(TextStyle),
+    SetColor(u32),
+    RenderChar(RenderChar),
+    RenderUtf8Text(RenderUtf8TextMsg<'a>),
+    RenderAsciiText(RenderAsciiTextMsg<'a>),
+    RenderString(RenderStringMsg),
+    RenderRectangle {
+        x: usize,
+        y: CanvasY,
+        w: usize,
+        h: usize,
+    },
+    FollowingTextCommandsAreHeaders(bool),
+    RenderUnderline {
+        x: usize,
+        y: CanvasY,
+        w: usize,
+    },
+    UpdatePulses,
+}
+
 #[derive(Debug, Clone)]
 pub struct Variable {
     pub name: Box<[char]>,
