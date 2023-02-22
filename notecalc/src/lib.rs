@@ -23,6 +23,7 @@ use crate::editor::editor_content::EditorContent;
 use crate::functions::FnType;
 use crate::matrix::MatrixData;
 use crate::renderer::{get_int_frac_part_len, render_result, render_result_into};
+use crate::shunting_yard::ShuntingYard;
 use crate::token_parser::{debug_print, OperatorTokenType, Token, TokenParser, TokenType};
 use crate::units::units::Units;
 
@@ -1663,6 +1664,48 @@ fn draw_cursor(
     }
 }
 
+fn draw_line_ref_chooser(
+    render_buckets: &mut RenderBuckets,
+    r: &PerLineRenderData,
+    gr: &GlobalRenderData,
+    line_reference_chooser: &Option<ContentIndex>,
+    result_gutter_x: usize,
+    theme: &Theme,
+) {
+    if let Some(selection_row) = line_reference_chooser {
+        if *selection_row == r.editor_y {
+            render_buckets.set_color(Layer::Text, theme.line_ref_selector);
+            render_buckets.draw_rect(
+                Layer::Text,
+                0,
+                r.render_y,
+                result_gutter_x + RIGHT_GUTTER_WIDTH + gr.current_result_panel_width,
+                r.rendered_row_height,
+            );
+        }
+    }
+}
+
+fn draw_right_gutter_num_prefixes(
+    render_buckets: &mut RenderBuckets,
+    result_gutter_x: usize,
+    editor_content: &EditorContent<LineData>,
+    r: &PerLineRenderData,
+    theme: &Theme,
+) {
+    match editor_content.get_data(r.editor_y.as_usize()).result_format {
+        ResultFormat::Hex => {
+            render_buckets.set_color(Layer::AboveText, theme.cursor);
+            render_buckets.draw_text(Layer::AboveText, result_gutter_x, r.render_y, &['0', 'x']);
+        }
+        ResultFormat::Bin => {
+            render_buckets.set_color(Layer::AboveText, theme.cursor);
+            render_buckets.draw_text(Layer::AboveText, result_gutter_x, r.render_y, &['0', 'b']);
+        }
+        ResultFormat::Dec => {}
+    }
+}
+
 pub fn pulse_modified_line_references(
     render_buckets: &mut RenderBuckets,
     gr: &GlobalRenderData,
@@ -2011,6 +2054,63 @@ fn underline_active_line_refs<'text_ptr>(
             _ => {}
         }
     }
+}
+
+fn find_parentesis_around_cursor(
+    tokens: &[Token],
+    r: &PerLineRenderData,
+    cursor_pos: Pos,
+) -> Option<(usize, usize)> {
+    let mut active_parenthesis: Option<(usize, usize)> = None;
+    if cursor_pos.row == r.editor_y.as_usize() {
+        let mut parenth_token_indices_stack = [0; 32];
+        let mut next_paren_stack_ptr = 0;
+        let mut stack_index_of_closes_open_parenth = 0;
+        let mut tokens_x_pos = 0;
+        for (i, token) in tokens.iter().enumerate() {
+            let before_cursor = tokens_x_pos < cursor_pos.column;
+            if !before_cursor && next_paren_stack_ptr == 0 {
+                // no opening bracket
+                break;
+            }
+            match (&token.typ, before_cursor) {
+                (TokenType::Operator(OperatorTokenType::ParenOpen), true) => {
+                    parenth_token_indices_stack[next_paren_stack_ptr] = i;
+                    stack_index_of_closes_open_parenth = next_paren_stack_ptr;
+                    next_paren_stack_ptr += 1;
+                }
+                (TokenType::Operator(OperatorTokenType::ParenClose), true) => {
+                    // TODO: kell ez az if, lehet ParenClose operator ParenOpen nélkül a tokenek között?
+                    if next_paren_stack_ptr > 0 {
+                        next_paren_stack_ptr -= 1;
+                        if next_paren_stack_ptr > 0 {
+                            stack_index_of_closes_open_parenth = next_paren_stack_ptr - 1;
+                        } else {
+                            stack_index_of_closes_open_parenth = 0;
+                        }
+                    }
+                }
+                (TokenType::Operator(OperatorTokenType::ParenOpen), false) => {
+                    parenth_token_indices_stack[next_paren_stack_ptr] = i;
+                    next_paren_stack_ptr += 1;
+                }
+                (TokenType::Operator(OperatorTokenType::ParenClose), false) => {
+                    if next_paren_stack_ptr - 1 == stack_index_of_closes_open_parenth {
+                        // this is the closes closing parenthesis
+                        active_parenthesis = Some((
+                            parenth_token_indices_stack[stack_index_of_closes_open_parenth],
+                            i,
+                        ));
+                        break;
+                    }
+                    next_paren_stack_ptr -= 1;
+                }
+                _ => {}
+            }
+            tokens_x_pos += token.ptr.len();
+        }
+    }
+    active_parenthesis
 }
 
 fn render_results_into_buf_and_calc_len<'text_ptr>(
