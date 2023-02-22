@@ -19,6 +19,9 @@ use crate::calc::{
 use crate::editor::editor::{
     Editor, EditorInputEvent, InputModifiers, Pos, RowModificationType, Selection,
 };
+use crate::editor::editor_content::EditorContent;
+use crate::functions::FnType;
+use crate::matrix::MatrixData;
 use crate::token_parser::{debug_print, OperatorTokenType, Token, TokenParser, TokenType};
 
 use bumpalo::Bump;
@@ -1138,6 +1141,301 @@ impl Default for LineData {
             line_id: 0,
             result_format: ResultFormat::Dec,
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct MatrixEditing {
+    pub editor_content: EditorContent<LineData>,
+    pub editor: Editor<LineData>,
+    row_count: usize,
+    col_count: usize,
+    current_cell: Pos,
+    start_text_index: usize,
+    end_text_index: usize,
+    row_index: ContentIndex,
+    cell_strings: Vec<String>,
+}
+
+impl MatrixEditing {
+    pub fn new<'a>(
+        row_count: usize,
+        col_count: usize,
+        src_canvas: &[char],
+        row_index: ContentIndex,
+        start_text_index: usize,
+        end_text_index: usize,
+        step_in_pos: Pos,
+    ) -> MatrixEditing {
+        let current_cell = if step_in_pos.row == row_index.as_usize() {
+            if step_in_pos.column > start_text_index {
+                // from right
+                Pos::from_row_column(0, col_count - 1)
+            } else {
+                // from left
+                Pos::from_row_column(0, 0)
+            }
+        } else if step_in_pos.row < row_index.as_usize() {
+            // from above
+            Pos::from_row_column(0, 0)
+        } else {
+            // from below
+            Pos::from_row_column(row_count - 1, 0)
+        };
+
+        let mut editor_content = EditorContent::new(32, 1);
+        let mut mat_edit = MatrixEditing {
+            row_index,
+            start_text_index,
+            end_text_index,
+            editor: Editor::new(&mut editor_content),
+            editor_content,
+            row_count,
+            col_count,
+            current_cell,
+            cell_strings: Vec::with_capacity((row_count * col_count).max(4)),
+        };
+        let mut str: String = String::with_capacity(8);
+        let mut can_ignore_ws = true;
+        for ch in src_canvas {
+            match ch {
+                '[' => {
+                    //ignore
+                }
+                ']' => {
+                    break;
+                }
+                ',' => {
+                    mat_edit.cell_strings.push(str);
+                    str = String::with_capacity(8);
+                    can_ignore_ws = true;
+                }
+                ';' => {
+                    mat_edit.cell_strings.push(str);
+                    str = String::with_capacity(8);
+                    can_ignore_ws = true;
+                }
+                _ if ch.is_ascii_whitespace() && can_ignore_ws => {
+                    // ignore
+                }
+                _ => {
+                    can_ignore_ws = false;
+                    str.push(*ch);
+                }
+            }
+        }
+        mat_edit.cell_strings.push(str);
+
+        let cell_index = mat_edit.current_cell.row * col_count + mat_edit.current_cell.column;
+        mat_edit
+            .editor_content
+            .init_with(&mat_edit.cell_strings[cell_index]);
+        // select all
+        mat_edit.editor.set_cursor_range(
+            Pos::from_row_column(0, 0),
+            Pos::from_row_column(0, mat_edit.editor_content.line_len(0)),
+        );
+
+        mat_edit
+    }
+
+    fn add_column(&mut self) {
+        if self.col_count == 6 {
+            return;
+        }
+        self.cell_strings
+            .reserve(self.row_count * (self.col_count + 1));
+        for row_i in (0..self.row_count).rev() {
+            let index = row_i * self.col_count + self.col_count;
+            // TODO alloc :(, but at least not in the hot path
+            self.cell_strings.insert(index, "0".to_owned());
+        }
+        self.col_count += 1;
+    }
+
+    fn add_row(&mut self) {
+        if self.row_count == 6 {
+            return;
+        }
+        self.cell_strings
+            .reserve((self.row_count + 1) * self.col_count);
+        self.row_count += 1;
+        for _ in 0..self.col_count {
+            // TODO alloc :(, but at least not in the hot path
+            self.cell_strings.push("0".to_owned());
+        }
+    }
+
+    fn remove_column(&mut self) {
+        self.col_count -= 1;
+        if self.current_cell.column >= self.col_count {
+            self.move_to_cell(self.current_cell.with_column(self.col_count - 1));
+        }
+        for row_i in (0..self.row_count).rev() {
+            let index = row_i * (self.col_count + 1) + self.col_count;
+            self.cell_strings.remove(index);
+        }
+    }
+
+    fn remove_row(&mut self) {
+        self.row_count -= 1;
+        if self.current_cell.row >= self.row_count {
+            self.move_to_cell(self.current_cell.with_row(self.row_count - 1));
+        }
+        for _ in 0..self.col_count {
+            self.cell_strings.pop();
+        }
+    }
+
+    fn move_to_cell(&mut self, new_pos: Pos) {
+        self.save_editor_content();
+
+        let new_content = &self.cell_strings[new_pos.row * self.col_count + new_pos.column];
+        self.editor_content.init_with(new_content);
+
+        self.current_cell = new_pos;
+        // select all
+        self.editor.set_cursor_range(
+            Pos::from_row_column(0, 0),
+            Pos::from_row_column(0, self.editor_content.line_len(0)),
+        );
+    }
+
+    fn save_editor_content(&mut self) {
+        let mut backend = &mut self.cell_strings
+            [self.current_cell.row * self.col_count + self.current_cell.column];
+        backend.clear();
+        self.editor_content.write_content_into(&mut backend);
+    }
+
+    fn render<'b>(
+        &self,
+        mut render_x: usize,
+        render_y: CanvasY,
+        current_editor_width: usize,
+        left_gutter_width: usize,
+        render_buckets: &mut RenderBuckets<'b>,
+        rendered_row_height: usize,
+        theme: &Theme,
+    ) -> usize {
+        let vert_align_offset =
+            (rendered_row_height - MatrixData::calc_render_height(self.row_count)) / 2;
+
+        render_matrix_left_brackets(
+            render_x + left_gutter_width,
+            render_y,
+            self.row_count,
+            render_buckets,
+            vert_align_offset,
+            false,
+        );
+        render_x += 1;
+
+        for col_i in 0..self.col_count {
+            if render_x >= current_editor_width {
+                return render_x;
+            }
+            let max_width: usize = (0..self.row_count)
+                .map(|row_i| {
+                    if self.current_cell == Pos::from_row_column(row_i, col_i) {
+                        self.editor_content.line_len(0)
+                    } else {
+                        self.cell_strings[row_i * self.col_count + col_i].len()
+                    }
+                })
+                .max()
+                .unwrap();
+            for row_i in 0..self.row_count {
+                // the content of the matrix starts from the second row
+                let matrix_ascii_header_offset = if self.row_count == 1 { 0 } else { 1 };
+                let dst_y = render_y.add(row_i + vert_align_offset + matrix_ascii_header_offset);
+                let len: usize = if self.current_cell == Pos::from_row_column(row_i, col_i) {
+                    self.editor_content.line_len(0)
+                } else {
+                    self.cell_strings[row_i * self.col_count + col_i].len()
+                };
+                let padding_x = max_width - len;
+                let text_len = len.min(
+                    (current_editor_width as isize - (render_x + padding_x) as isize).max(0)
+                        as usize,
+                );
+
+                if self.current_cell == Pos::from_row_column(row_i, col_i) {
+                    render_buckets
+                        .set_color(Layer::BehindTextAboveCursor, theme.matrix_edit_active_bg);
+                    render_buckets.draw_rect(
+                        Layer::BehindTextAboveCursor,
+                        render_x + padding_x + left_gutter_width,
+                        dst_y,
+                        text_len,
+                        1,
+                    );
+                    let chars = &self.editor_content.lines().next().unwrap();
+                    render_buckets.set_color(Layer::Text, theme.matrix_edit_active_text);
+                    for (i, char) in chars.iter().enumerate() {
+                        render_buckets.draw_char(
+                            Layer::Text,
+                            render_x + padding_x + left_gutter_width + i,
+                            dst_y,
+                            *char,
+                        );
+                    }
+                    let sel = self.editor.get_selection();
+                    if let Some((first, second)) = sel.is_range_ordered() {
+                        let len = second.column - first.column;
+                        render_buckets
+                            .set_color(Layer::BehindTextAboveCursor, theme.selection_color);
+                        render_buckets.draw_rect(
+                            Layer::BehindTextAboveCursor,
+                            render_x + padding_x + left_gutter_width + first.column,
+                            dst_y,
+                            len,
+                            1,
+                        );
+                    }
+                } else {
+                    let chars = &self.cell_strings[row_i * self.col_count + col_i];
+                    render_buckets.set_color(Layer::Text, theme.matrix_edit_inactive_text);
+                    render_buckets.draw_string(
+                        Layer::Text,
+                        render_x + padding_x + left_gutter_width,
+                        dst_y,
+                        (&chars[0..text_len]).to_owned(),
+                    );
+                }
+
+                if self.current_cell == Pos::from_row_column(row_i, col_i)
+                    && self.editor.is_cursor_shown()
+                {
+                    render_buckets.set_color(Layer::Text, theme.cursor);
+                    render_buckets.draw_char(
+                        Layer::Text,
+                        (self.editor.get_selection().get_cursor_pos().column + left_gutter_width)
+                            + render_x
+                            + padding_x,
+                        dst_y,
+                        '▏',
+                    );
+                }
+            }
+            render_x += if col_i + 1 < self.col_count {
+                max_width + MATRIX_ASCII_HEADER_FOOTER_LINE_COUNT
+            } else {
+                max_width
+            };
+        }
+
+        render_matrix_right_brackets(
+            render_x + left_gutter_width,
+            render_y,
+            self.row_count,
+            render_buckets,
+            vert_align_offset,
+            false,
+        );
+
+        render_x += 1;
+        render_x
     }
 }
 
