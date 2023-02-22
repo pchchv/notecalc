@@ -1,4 +1,38 @@
+use crate::token_parser::{debug_print, OperatorTokenType, Token, TokenParser, TokenType};
+
+use bumpalo::Bump;
+use helper::*;
+
+pub mod token_parser;
+
+pub const SCROLLBAR_WIDTH: usize = 1;
 pub const MAX_FUNCTION_PARAM_COUNT: usize = 6;
+pub const MAX_VAR_NAME_LEN: usize = 32;
+
+pub const RENDERED_RESULT_PRECISION: usize = 28;
+pub const MAX_EDITOR_WIDTH: usize = 120;
+pub const LEFT_GUTTER_MIN_WIDTH: usize = 2;
+
+// Currently y coords are transmitted as u8 to the frontend, if you raise this value,
+// don't forget to update  the communication layer as well
+pub const MAX_LINE_COUNT: usize = 256;
+pub const MAX_TOKEN_COUNT_PER_LINE: usize = MAX_LINE_COUNT;
+pub const RIGHT_GUTTER_WIDTH: usize = 2;
+pub const MIN_RESULT_PANEL_WIDTH: usize = 7;
+
+// There are some optimizationts (stack allocated arrays etc), where we have to know
+// the maximum lines rendered at once, so it is limited to 64
+pub const MAX_CLIENT_HEIGHT: usize = 64;
+pub const DEFAULT_RESULT_PANEL_WIDTH_PERCENT: usize = 30;
+pub const SUM_VARIABLE_INDEX: usize = MAX_LINE_COUNT;
+#[allow(dead_code)]
+pub const FIRST_FUNC_PARAM_VAR_INDEX: usize = SUM_VARIABLE_INDEX + 1;
+pub const VARIABLE_ARR_SIZE: usize = MAX_LINE_COUNT + 1 + MAX_FUNCTION_PARAM_COUNT;
+pub const MATRIX_ASCII_HEADER_FOOTER_LINE_COUNT: usize = 2;
+pub const ACTIVE_LINE_REF_HIGHLIGHT_COLORS: [u32; 9] = [
+    0xFFD300FF, 0xDE3163FF, 0x73c2fbFF, 0xc7ea46FF, 0x702963FF, 0x997950FF, 0x777b73FF, 0xFC6600FF,
+    0xED2939FF,
+];
 
 #[allow(dead_code)]
 pub struct Theme {
@@ -166,4 +200,98 @@ pub struct FunctionDef<'a> {
     pub param_count: usize,
     pub first_row_index: ContentIndex,
     pub last_row_index: ContentIndex,
+}
+
+pub fn try_extract_function_def<'b>(
+    parsed_tokens: &mut [Token<'b>],
+    allocator: &'b Bump,
+) -> Option<FunctionDef<'b>> {
+    if parsed_tokens.len() < 4
+        || (!parsed_tokens[0].ptr[0].is_alphabetic() && parsed_tokens[0].ptr[0] != '_')
+        || parsed_tokens[1].typ != TokenType::Operator(OperatorTokenType::ParenOpen)
+        || parsed_tokens.last().unwrap().ptr != &[':']
+    {
+        return None;
+    }
+
+    let mut fd = FunctionDef {
+        func_name: parsed_tokens[0].ptr,
+        param_names: [&[]; MAX_FUNCTION_PARAM_COUNT],
+        param_count: 0,
+        first_row_index: content_y(0),
+        last_row_index: content_y(0),
+    };
+
+    fn skip_whitespace_tokens(parsed_tokens: &[Token], token_index: &mut usize) {
+        while *token_index < parsed_tokens.len()
+            && parsed_tokens[*token_index].ptr[0].is_whitespace()
+        {
+            *token_index += 1;
+        }
+    }
+
+    fn close_var_name_parsing<'b>(
+        param_index: &mut usize,
+        fd: &mut FunctionDef<'b>,
+        var_name: &[char],
+        allocator: &'b Bump,
+    ) {
+        fd.param_names[*param_index] =
+            allocator.alloc_slice_fill_iter(var_name.iter().map(|it| *it));
+        *param_index += 1;
+    }
+
+    let mut param_index = 0;
+    let mut token_index = 2;
+    let mut token_indices_for_params = BitFlag256::empty();
+    let mut tmp_var_name: ArrayVec<[char; MAX_VAR_NAME_LEN]> = ArrayVec::new();
+
+    loop {
+        if token_index == parsed_tokens.len() - 2
+            && parsed_tokens[token_index].typ == TokenType::Operator(OperatorTokenType::ParenClose)
+            && parsed_tokens[token_index + 1].ptr == &[':']
+        {
+            if !tmp_var_name.is_empty() {
+                close_var_name_parsing(&mut param_index, &mut fd, &tmp_var_name, allocator);
+            }
+            break;
+        } else if parsed_tokens[token_index].typ == TokenType::Operator(OperatorTokenType::Comma) {
+            close_var_name_parsing(&mut param_index, &mut fd, &tmp_var_name, allocator);
+            tmp_var_name.clear();
+
+            token_index += 1; // skip ','
+            skip_whitespace_tokens(parsed_tokens, &mut token_index);
+        } else if matches!(
+            parsed_tokens[token_index].typ,
+            TokenType::StringLiteral | TokenType::Variable { .. }
+        ) {
+            if tmp_var_name.len() + parsed_tokens[token_index].ptr.len() > MAX_VAR_NAME_LEN {
+                return None;
+            }
+            tmp_var_name.extend_from_slice(parsed_tokens[token_index].ptr);
+            token_indices_for_params.set(token_index);
+            token_index += 1;
+        } else {
+            return None;
+        }
+    }
+
+    fd.param_count = param_index;
+
+    parsed_tokens[0].typ = TokenType::Operator(OperatorTokenType::Fn {
+        arg_count: fd.param_count,
+        typ: FnType::UserDefined(0),
+    });
+    // set ':' to operator
+    parsed_tokens.last_mut().unwrap().typ = TokenType::Operator(OperatorTokenType::Add);
+    // set param names to variables
+    for i in 0..parsed_tokens.len() {
+        if token_indices_for_params.is_true(i) {
+            parsed_tokens[i].typ = TokenType::Variable {
+                var_index: FIRST_FUNC_PARAM_VAR_INDEX + i,
+            };
+        }
+    }
+
+    return Some(fd);
 }
