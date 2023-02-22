@@ -23,6 +23,7 @@ use crate::token_parser::{debug_print, OperatorTokenType, Token, TokenParser, To
 
 use bumpalo::Bump;
 use helper::*;
+use std::time::Duration;
 
 pub mod editor;
 pub mod token_parser;
@@ -886,6 +887,25 @@ struct ScrollBarRenderInfo {
     scroll_bar_render_y: usize,
     scroll_bar_render_h: usize,
     max_scroll_y: usize,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct RenderStringMsg {
+    pub text: String,
+    pub row: CanvasY,
+    pub column: usize,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct PulsingRectangle {
+    pub x: usize,
+    pub y: CanvasY,
+    pub w: usize,
+    pub h: usize,
+    pub start_color: u32,
+    pub end_color: u32,
+    pub animation_time: Duration,
+    pub repeat: bool,
 }
 
 #[derive(Debug, Clone)]
