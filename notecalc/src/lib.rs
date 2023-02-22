@@ -929,6 +929,26 @@ pub struct RenderAsciiTextMsg<'a> {
     pub column: usize,
 }
 
+#[derive(Debug, PartialEq)]
+pub struct Rect {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+}
+
+#[repr(C)]
+pub enum Layer {
+    // function background
+    BehindTextBehindCursor,
+    // cursor
+    BehindTextCursor,
+    // highlighting words, matrix editor bg
+    BehindTextAboveCursor,
+    Text,
+    AboveText,
+}
+
 #[derive(Debug, Clone)]
 pub struct Variable {
     pub name: Box<[char]>,
