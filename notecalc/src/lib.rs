@@ -1,8 +1,26 @@
+#![feature(drain_filter)]
+#![feature(type_alias_impl_trait)]
+#![deny(
+    warnings,
+    anonymous_parameters,
+    unused_extern_crates,
+    unused_import_braces,
+    trivial_casts,
+    variant_size_differences,
+    trivial_numeric_casts,
+    unused_qualifications,
+    clippy::all
+)]
+
+use crate::editor::editor::{
+    Editor, EditorInputEvent, InputModifiers, Pos, RowModificationType, Selection,
+};
 use crate::token_parser::{debug_print, OperatorTokenType, Token, TokenParser, TokenType};
 
 use bumpalo::Bump;
 use helper::*;
 
+pub mod editor;
 pub mod token_parser;
 
 pub const SCROLLBAR_WIDTH: usize = 1;
@@ -34,6 +52,40 @@ pub const ACTIVE_LINE_REF_HIGHLIGHT_COLORS: [u32; 9] = [
     0xED2939FF,
 ];
 
+// "0,0,0;0,0,0;0,0,0".split("").map(x => '\'' + x + '\'').join(',')
+const AUTOCOMPLETION_CONSTS: [AutoCompletionConst; 5] = [
+    AutoCompletionConst {
+        abbrev: &['p', 'o', 'w'],
+        replace_to: &['^'],
+        relative_new_cursor_pos: None,
+    },
+    AutoCompletionConst {
+        abbrev: &['m', 'a', 't', '3'],
+        replace_to: &[
+            '[', '0', ',', '0', ',', '0', ';', '0', ',', '0', ',', '0', ';', '0', ',', '0', ',',
+            '0', ']',
+        ],
+        relative_new_cursor_pos: Some(1),
+    },
+    AutoCompletionConst {
+        abbrev: &['m', 'a', 't', '4'],
+        replace_to: &[
+            '[', '0', ',', '0', ',', '0', ',', '0', ';', '0', ',', '0', ',', '0', ',', '0', ';',
+            '0', ',', '0', ',', '0', ',', '0', ';', '0', ',', '0', ',', '0', ',', '0', ']',
+        ],
+        relative_new_cursor_pos: Some(1),
+    },
+    AutoCompletionConst {
+        abbrev: &['m', 'a', 't'],
+        replace_to: &['[', '0', ']'],
+        relative_new_cursor_pos: Some(1),
+    },
+    AutoCompletionConst {
+        abbrev: &['p', 'i'],
+        replace_to: &['π'],
+        relative_new_cursor_pos: None,
+    },
+];
 #[allow(dead_code)]
 pub struct Theme {
     pub bg: u32,
@@ -369,7 +421,17 @@ fn set_editor_and_result_panel_widths(
         .max(MIN_RESULT_PANEL_WIDTH as isize) as usize;
     gr.set_result_gutter_x(result_gutter_x);
 }
+
 pub fn default_result_gutter_x(client_width: usize) -> usize {
     (client_width * (100 - DEFAULT_RESULT_PANEL_WIDTH_PERCENT) / 100)
         .max(LEFT_GUTTER_MIN_WIDTH + SCROLLBAR_WIDTH)
+}
+
+fn is_pos_inside_an_obj(editor_objects: &EditorObjects, pos: Pos) -> Option<&EditorObject> {
+    for obj in &editor_objects[content_y(pos.row)] {
+        if (obj.start_x + 1..obj.end_x).contains(&pos.column) {
+            return Some(obj);
+        }
+    }
+    return None;
 }
