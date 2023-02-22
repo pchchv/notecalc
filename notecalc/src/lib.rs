@@ -2657,6 +2657,62 @@ fn is_pos_inside_an_obj(editor_objects: &EditorObjects, pos: Pos) -> Option<&Edi
     return None;
 }
 
+fn simple_draw_normal<'text_ptr>(
+    r: &mut PerLineRenderData,
+    gr: &mut GlobalRenderData,
+    render_buckets: &mut RenderBuckets<'text_ptr>,
+    editor_objects: &mut Vec<EditorObject>,
+    token: &Token<'text_ptr>,
+    theme: &Theme,
+) {
+    simple_draw(r, gr, render_buckets, editor_objects, token, false, theme);
+}
+
+fn simple_draw<'text_ptr>(
+    r: &mut PerLineRenderData,
+    gr: &mut GlobalRenderData,
+    render_buckets: &mut RenderBuckets<'text_ptr>,
+    editor_objects: &mut Vec<EditorObject>,
+    token: &Token<'text_ptr>,
+    is_bold: bool,
+    theme: &Theme,
+) {
+    if let Some(EditorObject {
+        typ: EditorObjectType::SimpleTokens,
+        end_x,
+        rendered_w,
+        ..
+    }) = editor_objects.last_mut()
+    {
+        // last token was a simple token too, extend it
+        *end_x += token.ptr.len();
+        *rendered_w += token.ptr.len();
+    } else {
+        editor_objects.push(EditorObject {
+            typ: EditorObjectType::SimpleTokens,
+            row: r.editor_y,
+            start_x: r.editor_x,
+            end_x: r.editor_x + token.ptr.len(),
+            rendered_x: r.render_x,
+            rendered_y: r.render_y,
+            rendered_w: token.ptr.len(),
+            rendered_h: r.rendered_row_height,
+        });
+    }
+    draw_token(
+        token,
+        r.render_x,
+        r.render_y.add(r.vert_align_offset),
+        gr.current_editor_width,
+        gr.left_gutter_width,
+        render_buckets,
+        is_bold,
+        theme,
+    );
+
+    r.token_render_done(token.ptr.len(), token.ptr.len(), 0);
+}
+
 fn sum_result(sum_var: &mut Variable, result: &CalcResult, sum_is_null: &mut bool) {
     if *sum_is_null {
         sum_var.value = Ok(result.clone());
