@@ -861,6 +861,33 @@ pub mod helper {
     }
 }
 
+//, α, Ω, β
+// γ - 	Greek Small Letter Gamma[1]
+// δ Greek Small Letter Delta
+// ε Greek Small Letter Epsilon
+// ζ Greek Small Letter Zeta[
+// η Greek Small Letter Eta
+// θ Greek Small Letter Theta
+// λ Greek Small Letter Lamda
+// μ Greek Small Letter Mu
+// φ Greek Small Letter Phi
+// ω Greek Small Letter Omega
+// ψ Greek Small Letter Psi
+// τ Greek Small Letter Tau
+// ϕ Greek Phi Symbol
+struct AutoCompletionConst {
+    //const PREFIX: char = '.';
+    abbrev: &'static [char],
+    replace_to: &'static [char],
+    relative_new_cursor_pos: Option<usize>,
+}
+
+struct ScrollBarRenderInfo {
+    scroll_bar_render_y: usize,
+    scroll_bar_render_h: usize,
+    max_scroll_y: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct Variable {
     pub name: Box<[char]>,
