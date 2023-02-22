@@ -983,6 +983,142 @@ pub enum OutputMessage<'a> {
     UpdatePulses,
 }
 
+#[derive(Debug)]
+pub struct RenderBuckets<'a> {
+    pub left_gutter_bg: Rect,
+    pub right_gutter_bg: Rect,
+    pub result_panel_bg: Rect,
+    pub scroll_bar: Option<(u32, Rect)>,
+    pub ascii_texts: Vec<RenderAsciiTextMsg<'a>>,
+    pub utf8_texts: Vec<RenderUtf8TextMsg<'a>>,
+    pub headers: Vec<RenderUtf8TextMsg<'a>>,
+    pub numbers: Vec<RenderUtf8TextMsg<'a>>,
+    pub number_errors: Vec<RenderUtf8TextMsg<'a>>,
+    pub units: Vec<RenderUtf8TextMsg<'a>>,
+    pub operators: Vec<RenderUtf8TextMsg<'a>>,
+    pub parenthesis: Vec<RenderChar>,
+    pub variable: Vec<RenderUtf8TextMsg<'a>>,
+    pub line_ref_results: Vec<RenderStringMsg>,
+    pub custom_commands: [Vec<OutputMessage<'a>>; 5],
+    pub pulses: Vec<PulsingRectangle>,
+    pub clear_pulses: bool,
+}
+
+impl<'a> RenderBuckets<'a> {
+    pub fn new() -> RenderBuckets<'a> {
+        RenderBuckets {
+            left_gutter_bg: Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            },
+            right_gutter_bg: Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            },
+            result_panel_bg: Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            },
+            scroll_bar: None,
+            ascii_texts: Vec::with_capacity(128),
+            utf8_texts: Vec::with_capacity(128),
+            headers: Vec::with_capacity(16),
+            custom_commands: [
+                Vec::with_capacity(128),
+                Vec::with_capacity(128),
+                Vec::with_capacity(128),
+                Vec::with_capacity(128),
+                Vec::with_capacity(128),
+            ],
+            numbers: Vec::with_capacity(32),
+            number_errors: Vec::with_capacity(32),
+            units: Vec::with_capacity(32),
+            operators: Vec::with_capacity(32),
+            parenthesis: Vec::with_capacity(32),
+            variable: Vec::with_capacity(32),
+            line_ref_results: Vec::with_capacity(32),
+            pulses: Vec::with_capacity(8),
+            clear_pulses: false,
+        }
+    }
+
+    pub fn custom_commands<'b>(&'b self, layer: Layer) -> &'b Vec<OutputMessage<'a>> {
+        &self.custom_commands[layer as usize]
+    }
+
+    pub fn clear(&mut self) {
+        self.ascii_texts.clear();
+        self.utf8_texts.clear();
+        self.headers.clear();
+        for bucket in self.custom_commands.iter_mut() {
+            bucket.clear();
+        }
+        self.numbers.clear();
+        self.number_errors.clear();
+        self.units.clear();
+        self.operators.clear();
+        self.variable.clear();
+        self.line_ref_results.clear();
+        self.pulses.clear();
+        self.parenthesis.clear();
+        self.clear_pulses = false;
+    }
+
+    pub fn set_color(&mut self, layer: Layer, color: u32) {
+        self.custom_commands[layer as usize].push(OutputMessage::SetColor(color));
+    }
+
+    pub fn draw_rect(&mut self, layer: Layer, x: usize, y: CanvasY, w: usize, h: usize) {
+        self.custom_commands[layer as usize].push(OutputMessage::RenderRectangle { x, y, w, h });
+    }
+
+    pub fn draw_char(&mut self, layer: Layer, col: usize, row: CanvasY, char: char) {
+        self.custom_commands[layer as usize].push(OutputMessage::RenderChar(RenderChar {
+            col,
+            row,
+            char,
+        }));
+    }
+
+    pub fn draw_text(&mut self, layer: Layer, x: usize, y: CanvasY, text: &'a [char]) {
+        self.custom_commands[layer as usize].push(OutputMessage::RenderUtf8Text(
+            RenderUtf8TextMsg {
+                text,
+                row: y,
+                column: x,
+            },
+        ));
+    }
+
+    pub fn draw_ascii_text(&mut self, layer: Layer, x: usize, y: CanvasY, text: &'a [u8]) {
+        self.custom_commands[layer as usize].push(OutputMessage::RenderAsciiText(
+            RenderAsciiTextMsg {
+                text,
+                row: y,
+                column: x,
+            },
+        ));
+    }
+
+    pub fn draw_underline(&mut self, layer: Layer, x: usize, y: CanvasY, w: usize) {
+        self.custom_commands[layer as usize].push(OutputMessage::RenderUnderline { x, y, w });
+    }
+
+    pub fn draw_string(&mut self, layer: Layer, x: usize, y: CanvasY, text: String) {
+        self.custom_commands[layer as usize].push(OutputMessage::RenderString(RenderStringMsg {
+            text: text.clone(),
+            row: y,
+            column: x,
+        }));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Variable {
     pub name: Box<[char]>,
