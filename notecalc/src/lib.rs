@@ -16,6 +16,7 @@ use crate::calc::{
     add_op, evaluate_tokens, get_var_name_from_assignment, process_variable_assignment_or_line_ref,
     CalcResult, CalcResultType, EvalErr, EvaluationResult, ShuntingYardResult,
 };
+use crate::constants::{LINE_NUM_CONSTS, LINE_NUM_CONSTS2, LINE_NUM_CONSTS3};
 use crate::editor::editor::{
     Editor, EditorInputEvent, InputModifiers, Pos, RowModificationType, Selection,
 };
@@ -32,6 +33,7 @@ use const_fn;
 use const_panic;
 use helper::*;
 use std::io::Cursor;
+use std::mem::MaybeUninit;
 use std::ops::Range;
 use std::time::Duration;
 use strum_macros::EnumDiscriminants;
@@ -2111,6 +2113,684 @@ fn find_parentesis_around_cursor(
         }
     }
     active_parenthesis
+}
+
+fn render_simple_text_line<'text_ptr>(
+    line: &[char],
+    r: &mut PerLineRenderData,
+    gr: &mut GlobalRenderData,
+    render_buckets: &mut RenderBuckets<'text_ptr>,
+    allocator: &'text_ptr Bump,
+) {
+    r.set_fix_row_height(1);
+    gr.set_rendered_height(r.editor_y, 1);
+
+    let text_len = line.len().min(gr.current_editor_width);
+
+    render_buckets.utf8_texts.push(RenderUtf8TextMsg {
+        text: allocator.alloc_slice_fill_iter(line.iter().map(|it| *it).take(text_len)),
+        row: r.render_y,
+        column: gr.left_gutter_width,
+    });
+
+    r.token_render_done(text_len, text_len, 0);
+}
+
+fn render_tokens<'text_ptr>(
+    tokens: &[Token<'text_ptr>],
+    r: &mut PerLineRenderData,
+    gr: &mut GlobalRenderData,
+    render_buckets: &mut RenderBuckets<'text_ptr>,
+    editor_objects: &mut Vec<EditorObject>,
+    editor: &Editor<LineData>,
+    matrix_editing: &Option<MatrixEditing>,
+    vars: &Variables,
+    units: &Units,
+    need_matrix_renderer: bool,
+    decimal_count: Option<usize>,
+    theme: &Theme,
+) {
+    editor_objects.clear();
+    let cursor_pos = editor.get_selection().get_cursor_pos();
+    let parenthesis_around_cursor = find_parentesis_around_cursor(tokens, r, cursor_pos);
+
+    let mut token_index = 0;
+    while token_index < tokens.len() {
+        let token = &tokens[token_index];
+
+        if !need_matrix_renderer {
+            simple_draw_normal(r, gr, render_buckets, editor_objects, token, theme);
+            token_index += 1;
+        } else {
+            match &token.typ {
+                TokenType::Operator(OperatorTokenType::Matrix {
+                    row_count,
+                    col_count,
+                }) => {
+                    token_index = render_matrix(
+                        token_index,
+                        &tokens,
+                        *row_count,
+                        *col_count,
+                        r,
+                        gr,
+                        render_buckets,
+                        editor_objects,
+                        &editor,
+                        &matrix_editing,
+                        decimal_count,
+                        theme,
+                    );
+                }
+                TokenType::Variable { var_index } => {
+                    editor_objects.push(EditorObject {
+                        typ: EditorObjectType::Variable {
+                            var_index: *var_index,
+                        },
+                        row: r.editor_y,
+                        start_x: r.editor_x,
+                        end_x: r.editor_x + token.ptr.len(),
+                        rendered_x: r.render_x,
+                        rendered_y: r.render_y,
+                        rendered_w: token.ptr.len(),
+                        rendered_h: r.rendered_row_height,
+                    });
+                    draw_token(
+                        token,
+                        r.render_x,
+                        r.render_y.add(r.vert_align_offset),
+                        gr.current_editor_width,
+                        gr.left_gutter_width,
+                        render_buckets,
+                        false, // is bold
+                        theme,
+                    );
+
+                    token_index += 1;
+                    r.token_render_done(token.ptr.len(), token.ptr.len(), 0);
+                }
+                TokenType::LineReference { var_index } => {
+                    let var = vars[*var_index].as_ref().unwrap();
+
+                    let (rendered_width, rendered_height) = render_result_inside_editor(
+                        units,
+                        render_buckets,
+                        &var.value,
+                        r,
+                        gr,
+                        decimal_count,
+                        theme,
+                    );
+
+                    let var_name_len = var.name.len();
+                    editor_objects.push(EditorObject {
+                        typ: EditorObjectType::LineReference {
+                            var_index: *var_index,
+                        },
+                        row: r.editor_y,
+                        start_x: r.editor_x,
+                        end_x: r.editor_x + var_name_len,
+                        rendered_x: r.render_x,
+                        rendered_y: r.render_y,
+                        rendered_w: rendered_width,
+                        rendered_h: rendered_height,
+                    });
+
+                    token_index += 1;
+                    r.token_render_done(
+                        var_name_len,
+                        rendered_width,
+                        if cursor_pos.column > r.editor_x {
+                            let diff = rendered_width as isize - var_name_len as isize;
+                            diff
+                        } else {
+                            0
+                        },
+                    );
+                }
+                TokenType::Operator(OperatorTokenType::ParenOpen) => {
+                    let is_bold = parenthesis_around_cursor
+                        .map(|(opening_paren_index, _closing_paren_index)| {
+                            opening_paren_index == token_index
+                        })
+                        .unwrap_or(false);
+                    simple_draw(r, gr, render_buckets, editor_objects, token, is_bold, theme);
+                    token_index += 1;
+                }
+                TokenType::Operator(OperatorTokenType::ParenClose) => {
+                    let is_bold = parenthesis_around_cursor
+                        .map(|(_opening_paren_index, closing_paren_index)| {
+                            closing_paren_index == token_index
+                        })
+                        .unwrap_or(false);
+                    simple_draw(r, gr, render_buckets, editor_objects, token, is_bold, theme);
+                    token_index += 1;
+                }
+                TokenType::StringLiteral
+                | TokenType::Header
+                | TokenType::NumberLiteral(_)
+                | TokenType::Operator(_)
+                | TokenType::Unit(_, _)
+                | TokenType::NumberErr => {
+                    simple_draw_normal(r, gr, render_buckets, editor_objects, token, theme);
+                    token_index += 1;
+                }
+            }
+        }
+    }
+}
+
+fn render_wrap_dots(
+    render_buckets: &mut RenderBuckets,
+    r: &PerLineRenderData,
+    gr: &GlobalRenderData,
+    theme: &Theme,
+) {
+    if r.render_x > gr.current_editor_width {
+        // the gutter is above the text, so it must also be above the text
+        render_buckets.set_color(Layer::AboveText, theme.text);
+        for y in 0..r.rendered_row_height {
+            render_buckets.draw_char(
+                Layer::AboveText,
+                gr.result_gutter_x - 1,
+                r.render_y.add(y),
+                '…', // '...'
+            );
+        }
+    }
+}
+
+fn render_matrix<'text_ptr>(
+    token_index: usize,
+    tokens: &[Token<'text_ptr>],
+    row_count: usize,
+    col_count: usize,
+    r: &mut PerLineRenderData,
+    gr: &mut GlobalRenderData,
+    render_buckets: &mut RenderBuckets<'text_ptr>,
+    editor_objects: &mut Vec<EditorObject>,
+    editor: &Editor<LineData>,
+    matrix_editing: &Option<MatrixEditing>,
+    _decimal_count: Option<usize>,
+    theme: &Theme,
+) -> usize {
+    let mut text_width = 0;
+    let mut end_token_index = token_index;
+
+    while tokens[end_token_index].typ != TokenType::Operator(OperatorTokenType::BracketClose) {
+        text_width += tokens[end_token_index].ptr.len();
+        end_token_index += 1;
+    }
+    let matrix_has_errors = tokens[end_token_index].has_error;
+    // ignore the bracket as well
+    text_width += 1;
+    end_token_index += 1;
+
+    let cursor_pos = editor.get_selection().get_cursor_pos();
+    let cursor_inside_matrix: bool = if !editor.get_selection().is_range()
+        && cursor_pos.row == r.editor_y.as_usize()
+        && cursor_pos.column > r.editor_x
+        && cursor_pos.column < r.editor_x + text_width
+    {
+        // cursor is inside the matrix
+        true
+    } else {
+        false
+    };
+
+    let new_render_x = if let (true, Some(mat_editor)) = (cursor_inside_matrix, matrix_editing) {
+        mat_editor.render(
+            r.render_x,
+            r.render_y,
+            gr.current_editor_width,
+            gr.left_gutter_width,
+            render_buckets,
+            r.rendered_row_height,
+            &THEMES[gr.theme_index],
+        )
+    } else {
+        render_matrix_obj(
+            r.render_x,
+            r.render_y,
+            gr.current_editor_width,
+            gr.left_gutter_width,
+            row_count,
+            col_count,
+            &tokens[token_index..],
+            render_buckets,
+            r.rendered_row_height,
+            theme,
+            matrix_has_errors,
+        )
+    };
+
+    let rendered_width = new_render_x - r.render_x;
+    editor_objects.push(EditorObject {
+        typ: EditorObjectType::Matrix {
+            row_count,
+            col_count,
+        },
+        row: r.editor_y,
+        start_x: r.editor_x,
+        end_x: r.editor_x + text_width,
+        rendered_x: r.render_x,
+        rendered_y: r.render_y,
+        rendered_w: rendered_width,
+        rendered_h: MatrixData::calc_render_height(row_count),
+    });
+
+    let x_diff = if cursor_pos.row == r.editor_y.as_usize()
+        && cursor_pos.column >= r.editor_x + text_width
+    {
+        let diff = rendered_width as isize - text_width as isize;
+        diff
+    } else {
+        0
+    };
+
+    r.token_render_done(text_width, rendered_width, x_diff);
+    return end_token_index;
+}
+
+fn render_matrix_obj<'text_ptr>(
+    mut render_x: usize,
+    render_y: CanvasY,
+    current_editor_width: usize,
+    left_gutter_width: usize,
+    row_count: usize,
+    col_count: usize,
+    tokens: &[Token<'text_ptr>],
+    render_buckets: &mut RenderBuckets<'text_ptr>,
+    rendered_row_height: usize,
+    theme: &Theme,
+    matrix_has_errors: bool,
+) -> usize {
+    let vert_align_offset = (rendered_row_height - MatrixData::calc_render_height(row_count)) / 2;
+
+    if render_x < current_editor_width {
+        render_matrix_left_brackets(
+            render_x + left_gutter_width,
+            render_y,
+            row_count,
+            render_buckets,
+            vert_align_offset,
+            matrix_has_errors,
+        );
+    }
+    render_x += 1;
+
+    let tokens_per_cell = {
+        let mut matrix_cells_for_tokens: [MaybeUninit<&[Token]>; 36] =
+            unsafe { MaybeUninit::uninit().assume_init() };
+
+        let mut start_token_index = 0;
+        let mut cell_index = 0;
+        let mut can_ignore_ws = true;
+        for (token_index, token) in tokens.iter().enumerate() {
+            if token.typ == TokenType::Operator(OperatorTokenType::BracketClose) {
+                matrix_cells_for_tokens[cell_index] =
+                    MaybeUninit::new(&tokens[start_token_index..token_index]);
+                break;
+            } else if token.typ
+                == TokenType::Operator(OperatorTokenType::Matrix {
+                    row_count,
+                    col_count,
+                })
+                || token.typ == TokenType::Operator(OperatorTokenType::BracketOpen)
+            {
+                // skip them
+                start_token_index = token_index + 1;
+            } else if can_ignore_ws && token.ptr[0].is_ascii_whitespace() {
+                start_token_index = token_index + 1;
+            } else if token.typ == TokenType::Operator(OperatorTokenType::Comma)
+                || token.typ == TokenType::Operator(OperatorTokenType::Semicolon)
+            {
+                matrix_cells_for_tokens[cell_index] =
+                    MaybeUninit::new(&tokens[start_token_index..token_index]);
+                start_token_index = token_index + 1;
+                cell_index += 1;
+                can_ignore_ws = true;
+            } else {
+                can_ignore_ws = false;
+            }
+        }
+        unsafe { std::mem::transmute::<_, [&[Token]; 36]>(matrix_cells_for_tokens) }
+    };
+
+    for col_i in 0..col_count {
+        let max_width: usize = (0..row_count)
+            .map(|row_i| {
+                tokens_per_cell[row_i * col_count + col_i]
+                    .iter()
+                    .map(|it| it.ptr.len())
+                    .sum()
+            })
+            .max()
+            .unwrap();
+        for row_i in 0..row_count {
+            let tokens = &tokens_per_cell[row_i * col_count + col_i];
+            let len: usize = tokens.iter().map(|it| it.ptr.len()).sum();
+            let offset_x = max_width - len;
+            let mut local_x = 0;
+            // the content of the matrix starts from the second row
+            let matrix_ascii_header_offset = if row_count == 1 { 0 } else { 1 };
+            let dst_y = row_i + vert_align_offset + matrix_ascii_header_offset;
+            for token in tokens.iter() {
+                if render_x <= current_editor_width {
+                    draw_token(
+                        token,
+                        render_x + offset_x + local_x,
+                        render_y.add(dst_y),
+                        current_editor_width,
+                        left_gutter_width,
+                        render_buckets,
+                        false,
+                        theme,
+                    );
+                }
+                local_x += token.ptr.len();
+            }
+        }
+        render_x += if col_i + 1 < col_count {
+            max_width + 2
+        } else {
+            max_width
+        };
+    }
+
+    if render_x < current_editor_width {
+        render_matrix_right_brackets(
+            render_x + left_gutter_width,
+            render_y,
+            row_count,
+            render_buckets,
+            vert_align_offset,
+            matrix_has_errors,
+        );
+    }
+    render_x += 1;
+
+    render_x
+}
+
+fn render_matrix_left_brackets(
+    x: usize,
+    render_y: CanvasY,
+    row_count: usize,
+    render_buckets: &mut RenderBuckets,
+    vert_align_offset: usize,
+    matrix_has_errors: bool,
+) {
+    let dst_bucket = if matrix_has_errors {
+        &mut render_buckets.number_errors
+    } else {
+        &mut render_buckets.operators
+    };
+    if row_count == 1 {
+        dst_bucket.push(RenderUtf8TextMsg {
+            text: &['['],
+            row: render_y.add(vert_align_offset),
+            column: x,
+        });
+    } else {
+        dst_bucket.push(RenderUtf8TextMsg {
+            text: &['┌'],
+            row: render_y.add(vert_align_offset),
+            column: x,
+        });
+        for i in 0..row_count {
+            dst_bucket.push(RenderUtf8TextMsg {
+                text: &['│'],
+                row: render_y.add(i + vert_align_offset + 1),
+                column: x,
+            });
+        }
+        dst_bucket.push(RenderUtf8TextMsg {
+            text: &['└'],
+            row: render_y.add(row_count + vert_align_offset + 1),
+            column: x,
+        });
+    };
+}
+
+fn render_matrix_right_brackets(
+    x: usize,
+    render_y: CanvasY,
+    row_count: usize,
+    render_buckets: &mut RenderBuckets,
+    vert_align_offset: usize,
+    matrix_has_errors: bool,
+) {
+    let dst_bucket = if matrix_has_errors {
+        &mut render_buckets.number_errors
+    } else {
+        &mut render_buckets.operators
+    };
+    if row_count == 1 {
+        dst_bucket.push(RenderUtf8TextMsg {
+            text: &[']'],
+            row: render_y.add(vert_align_offset),
+            column: x,
+        });
+    } else {
+        dst_bucket.push(RenderUtf8TextMsg {
+            text: &['┐'],
+            row: render_y.add(vert_align_offset),
+            column: x,
+        });
+        for i in 0..row_count {
+            dst_bucket.push(RenderUtf8TextMsg {
+                text: &['│'],
+                row: render_y.add(i + 1 + vert_align_offset),
+                column: x,
+            });
+        }
+        dst_bucket.push(RenderUtf8TextMsg {
+            text: &['┘'],
+            row: render_y.add(row_count + 1 + vert_align_offset),
+            column: x,
+        });
+    }
+}
+
+fn render_matrix_result<'text_ptr>(
+    units: &Units,
+    mut render_x: usize,
+    render_y: CanvasY,
+    clip_right: usize,
+    mat: &MatrixData,
+    render_buckets: &mut RenderBuckets<'text_ptr>,
+    prev_mat_result_lengths: Option<&ResultLengths>,
+    rendered_row_height: usize,
+    decimal_count: Option<usize>,
+    text_color: u32,
+) -> usize {
+    let start_x = render_x;
+
+    let vert_align_offset = (rendered_row_height - mat.render_height()) / 2;
+    if render_x < clip_right {
+        render_matrix_left_brackets(
+            start_x,
+            render_y,
+            mat.row_count,
+            render_buckets,
+            vert_align_offset,
+            false,
+        );
+    }
+    render_x += 1;
+
+    let cells_strs = {
+        let mut tokens_per_cell: ArrayVec<[String; 32]> = ArrayVec::new();
+
+        for cell in mat.cells.iter() {
+            let result_str =
+                render_result(units, cell, &ResultFormat::Dec, false, decimal_count, true);
+            tokens_per_cell.push(result_str);
+        }
+        tokens_per_cell
+    };
+
+    let max_lengths = {
+        let mut max_lengths = ResultLengths {
+            int_part_len: prev_mat_result_lengths
+                .as_ref()
+                .map(|it| it.int_part_len)
+                .unwrap_or(0),
+            frac_part_len: prev_mat_result_lengths
+                .as_ref()
+                .map(|it| it.frac_part_len)
+                .unwrap_or(0),
+            unit_part_len: prev_mat_result_lengths
+                .as_ref()
+                .map(|it| it.unit_part_len)
+                .unwrap_or(0),
+        };
+        for cell_str in &cells_strs {
+            let lengths = get_int_frac_part_len(cell_str);
+            max_lengths.set_max(&lengths);
+        }
+        max_lengths
+    };
+    render_buckets.set_color(Layer::Text, text_color);
+
+    for col_i in 0..mat.col_count {
+        if render_x >= clip_right {
+            break;
+        }
+        for row_i in 0..mat.row_count {
+            let cell_str = &cells_strs[row_i * mat.col_count + col_i];
+            let lengths = get_int_frac_part_len(cell_str);
+            // Draw integer part
+            let offset_x = max_lengths.int_part_len - lengths.int_part_len;
+            // the content of the matrix starts from the second row
+            let matrix_ascii_header_offset = if mat.row_count == 1 { 0 } else { 1 };
+            let dst_y = render_y.add(row_i + vert_align_offset + matrix_ascii_header_offset);
+            render_buckets.draw_string(
+                Layer::Text,
+                render_x + offset_x,
+                dst_y,
+                cell_str[0..lengths.int_part_len].to_owned(),
+            );
+
+            let mut frac_offset_x = 0;
+            if lengths.frac_part_len > 0 {
+                render_buckets.draw_string(
+                    Layer::Text,
+                    render_x + offset_x + lengths.int_part_len,
+                    dst_y,
+                    cell_str[lengths.int_part_len..lengths.int_part_len + lengths.frac_part_len]
+                        .to_owned(),
+                )
+            } else if max_lengths.frac_part_len > 0 {
+                render_buckets.draw_char(
+                    Layer::Text,
+                    render_x + offset_x + lengths.int_part_len,
+                    dst_y,
+                    '.',
+                );
+                frac_offset_x = 1;
+            }
+            for i in 0..max_lengths.frac_part_len - lengths.frac_part_len - frac_offset_x {
+                render_buckets.draw_char(
+                    Layer::Text,
+                    render_x
+                        + offset_x
+                        + lengths.int_part_len
+                        + lengths.frac_part_len
+                        + frac_offset_x
+                        + i,
+                    dst_y,
+                    '0',
+                )
+            }
+            if lengths.unit_part_len > 0 {
+                render_buckets.draw_string(
+                    Layer::Text,
+                    render_x + offset_x + lengths.int_part_len + max_lengths.frac_part_len + 1,
+                    dst_y,
+                    cell_str[lengths.int_part_len + lengths.frac_part_len + 1..].to_owned(),
+                )
+            }
+        }
+        render_x += if col_i + 1 < mat.col_count {
+            (max_lengths.int_part_len + max_lengths.frac_part_len + max_lengths.unit_part_len) + 2
+        } else {
+            max_lengths.int_part_len + max_lengths.frac_part_len + max_lengths.unit_part_len
+        };
+    }
+
+    if render_x < clip_right {
+        render_matrix_right_brackets(
+            render_x,
+            render_y,
+            mat.row_count,
+            render_buckets,
+            vert_align_offset,
+            false,
+        );
+    }
+    render_x += 1;
+    return render_x - start_x;
+}
+
+fn render_result_inside_editor<'text_ptr>(
+    units: &Units,
+    render_buckets: &mut RenderBuckets<'text_ptr>,
+    result: &Result<CalcResult, ()>,
+    r: &PerLineRenderData,
+    gr: &GlobalRenderData,
+    decimal_count: Option<usize>,
+    theme: &Theme,
+) -> (usize, usize) {
+    return match &result {
+        Ok(CalcResult {
+            typ: CalcResultType::Matrix(mat),
+            ..
+        }) => {
+            let rendered_width = render_matrix_result(
+                units,
+                gr.left_gutter_width + r.render_x,
+                r.render_y,
+                gr.result_gutter_x - SCROLLBAR_WIDTH,
+                mat,
+                render_buckets,
+                None,
+                r.rendered_row_height,
+                decimal_count,
+                theme.referenced_matrix_text,
+            );
+            (rendered_width, mat.render_height())
+        }
+        Ok(result) => {
+            let result_str = render_result(
+                &units,
+                result,
+                &ResultFormat::Dec,
+                false,
+                decimal_count,
+                true,
+            );
+            let text_len = result_str.chars().count();
+            let bounded_text_len = text_len
+                .min((gr.current_editor_width as isize - r.render_x as isize).max(0) as usize);
+
+            render_buckets.line_ref_results.push(RenderStringMsg {
+                text: result_str[0..bounded_text_len].to_owned(),
+                row: r.render_y,
+                column: r.render_x + gr.left_gutter_width,
+            });
+            (text_len, 1)
+        }
+        Err(_) => {
+            render_buckets.line_ref_results.push(RenderStringMsg {
+                text: "Err".to_owned(),
+                row: r.render_y,
+                column: r.render_x + gr.left_gutter_width,
+            });
+            (3, 1)
+        }
+    };
 }
 
 fn render_results_into_buf_and_calc_len<'text_ptr>(
