@@ -1694,6 +1694,205 @@ pub fn pulse_modified_line_references(
     }
 }
 
+fn render_selection_and_its_sum<'text_ptr>(
+    units: &Units,
+    render_buckets: &mut RenderBuckets<'text_ptr>,
+    results: &Results,
+    editor: &Editor<LineData>,
+    editor_content: &EditorContent<LineData>,
+    gr: &GlobalRenderData,
+    vars: &Variables,
+    func_defs: &FunctionDefinitions<'text_ptr>,
+    allocator: &'text_ptr Bump,
+    theme: &Theme,
+    apptokens: &AppTokens,
+) {
+    render_buckets.set_color(Layer::BehindTextAboveCursor, theme.selection_color);
+    if let Some((start, end)) = editor.get_selection().is_range_ordered() {
+        if end.row > start.row {
+            // first line
+            if let Some(start_render_y) = gr.get_render_y(content_y(start.row)) {
+                let height = gr.get_rendered_height(content_y(start.row));
+                let w = editor_content.line_len(start.row);
+                if w > start.column {
+                    render_buckets.draw_rect(
+                        Layer::BehindTextAboveCursor,
+                        start.column + gr.left_gutter_width,
+                        start_render_y,
+                        (w - start.column).min(gr.current_editor_width),
+                        height,
+                    );
+                }
+            }
+            // full lines
+            for i in start.row + 1..end.row {
+                if let Some(render_y) = gr.get_render_y(content_y(i)) {
+                    let height = gr.get_rendered_height(content_y(i));
+                    render_buckets.draw_rect(
+                        Layer::BehindTextAboveCursor,
+                        gr.left_gutter_width,
+                        render_y,
+                        editor_content.line_len(i).min(gr.current_editor_width),
+                        height,
+                    );
+                }
+            }
+            // last line
+            if let Some(end_render_y) = gr.get_render_y(content_y(end.row)) {
+                let height = gr.get_rendered_height(content_y(end.row));
+                render_buckets.draw_rect(
+                    Layer::BehindTextAboveCursor,
+                    gr.left_gutter_width,
+                    end_render_y,
+                    end.column.min(gr.current_editor_width),
+                    height,
+                );
+            }
+        } else if let Some(start_render_y) = gr.get_render_y(content_y(start.row)) {
+            let height = gr.get_rendered_height(content_y(start.row));
+            render_buckets.draw_rect(
+                Layer::BehindTextAboveCursor,
+                start.column + gr.left_gutter_width,
+                start_render_y,
+                (end.column - start.column).min(gr.current_editor_width),
+                height,
+            );
+        }
+        // evaluated result of selection, selected text
+        if let Some(mut partial_result) = evaluate_selection(
+            &units,
+            editor,
+            editor_content,
+            &vars,
+            func_defs,
+            results.as_slice(),
+            allocator,
+            apptokens,
+        ) {
+            if start.row == end.row {
+                if let Some(start_render_y) = gr.get_render_y(content_y(start.row)) {
+                    let selection_center = start.column + ((end.column - start.column) / 2);
+                    partial_result.insert_str(0, "= ");
+                    let result_w = partial_result.chars().count();
+                    let centered_x =
+                        (selection_center as isize - (result_w / 2) as isize).max(0) as usize;
+                    render_buckets.set_color(Layer::AboveText, theme.sum_bg_color);
+                    let rect_y = if start.row == 0 {
+                        start_render_y.add(1)
+                    } else {
+                        start_render_y.sub(1)
+                    };
+                    render_buckets.draw_rect(
+                        Layer::AboveText,
+                        gr.left_gutter_width + centered_x,
+                        rect_y,
+                        result_w,
+                        1,
+                    );
+                    render_buckets.set_color(Layer::AboveText, theme.sum_text_color);
+                    render_buckets.draw_string(
+                        Layer::AboveText,
+                        gr.left_gutter_width + centered_x,
+                        rect_y,
+                        partial_result,
+                    );
+                }
+            } else {
+                partial_result.insert_str(0, " ∑ = ");
+                let result_w = partial_result.chars().count();
+                let x = (start.row..=end.row)
+                    .map(|it| editor_content.line_len(it))
+                    .max_by(|a, b| a.cmp(b))
+                    .unwrap()
+                    + 3;
+                let frist_visible_row_index = content_y(start.row.max(gr.scroll_y));
+                let last_visible_row_index =
+                    content_y(end.row.min(gr.scroll_y + gr.client_height - 1));
+                let inner_height = gr
+                    .get_render_y(last_visible_row_index)
+                    .expect("")
+                    .as_usize()
+                    - gr.get_render_y(frist_visible_row_index)
+                        .expect("")
+                        .as_usize();
+                render_buckets.set_color(Layer::AboveText, theme.sum_bg_color);
+                render_buckets.draw_rect(
+                    Layer::AboveText,
+                    gr.left_gutter_width + x,
+                    gr.get_render_y(frist_visible_row_index).expect(""),
+                    result_w + 1,
+                    inner_height + 1,
+                );
+                // draw the parenthesis
+                render_buckets.set_color(Layer::AboveText, theme.sum_text_color);
+
+                render_buckets.draw_char(
+                    Layer::AboveText,
+                    gr.left_gutter_width + x,
+                    gr.get_render_y(frist_visible_row_index).expect(""),
+                    if frist_visible_row_index.as_usize() == start.row {
+                        '⎫'
+                    } else {
+                        '⎪'
+                    },
+                );
+
+                render_buckets.draw_char(
+                    Layer::AboveText,
+                    gr.left_gutter_width + x,
+                    gr.get_render_y(last_visible_row_index).expect(""),
+                    if last_visible_row_index.as_usize() == end.row {
+                        '⎭'
+                    } else {
+                        '⎪'
+                    },
+                );
+
+                for i in 1..inner_height {
+                    render_buckets.draw_char(
+                        Layer::AboveText,
+                        gr.left_gutter_width + x,
+                        gr.get_render_y(frist_visible_row_index).expect("").add(i),
+                        '⎪',
+                    );
+                }
+                // center
+                render_buckets.draw_string(
+                    Layer::AboveText,
+                    gr.left_gutter_width + x,
+                    gr.get_render_y(frist_visible_row_index)
+                        .expect("")
+                        .add(inner_height / 2),
+                    partial_result,
+                );
+            }
+        }
+    }
+}
+
+fn calc_rendered_height<'b>(
+    editor_y: ContentIndex,
+    matrix_editing: &Option<MatrixEditing>,
+    tokens: &AppTokens,
+    results: &Results,
+    vars: &Variables,
+) -> usize {
+    return if let Some(tokens) = &tokens[editor_y] {
+        let h = PerLineRenderData::calc_rendered_row_height(
+            &results[editor_y],
+            &tokens.tokens,
+            vars,
+            matrix_editing
+                .as_ref()
+                .filter(|it| it.row_index == editor_y)
+                .map(|it| MatrixData::calc_render_height(it.row_count)),
+        );
+        h
+    } else {
+        1
+    };
+}
+
 pub fn end_matrix_editing(
     matrix_editing: &mut Option<MatrixEditing>,
     editor: &mut Editor<LineData>,
