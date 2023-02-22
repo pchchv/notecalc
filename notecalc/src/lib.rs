@@ -1449,6 +1449,63 @@ pub type LineResult = Result<Option<CalcResult>, EvalErr>;
 pub type Variables = [Option<Variable>];
 pub type FunctionDefinitions<'a> = [Option<FunctionDef<'a>>];
 
+pub fn end_matrix_editing(
+    matrix_editing: &mut Option<MatrixEditing>,
+    editor: &mut Editor<LineData>,
+    editor_content: &mut EditorContent<LineData>,
+    new_cursor_pos: Option<Pos>,
+) {
+    let mat_editor = {
+        let mat_editor = matrix_editing.as_mut().unwrap();
+        mat_editor.save_editor_content();
+        mat_editor
+    };
+    let mut concat = String::with_capacity(32);
+    concat.push('[');
+    for row_i in 0..mat_editor.row_count {
+        if row_i > 0 {
+            concat.push(';');
+        }
+        for col_i in 0..mat_editor.col_count {
+            if col_i > 0 {
+                concat.push(',');
+            }
+            let cell_str = &mat_editor.cell_strings[row_i * mat_editor.col_count + col_i];
+            concat += &cell_str;
+        }
+    }
+    concat.push(']');
+
+    if editor_content.line_len(mat_editor.row_index.as_usize()) + concat.len()
+        - (mat_editor.end_text_index - mat_editor.start_text_index)
+        < MAX_EDITOR_WIDTH
+    {
+        let selection = Selection::range(
+            Pos::from_row_column(mat_editor.row_index.as_usize(), mat_editor.start_text_index),
+            Pos::from_row_column(mat_editor.row_index.as_usize(), mat_editor.end_text_index),
+        );
+        editor.set_selection_save_col(selection);
+        editor.handle_input_undoable(
+            EditorInputEvent::Del,
+            InputModifiers::none(),
+            editor_content,
+        );
+        editor.insert_text_undoable(&concat, editor_content);
+    }
+    *matrix_editing = None;
+
+    if let Some(new_cursor_pos) = new_cursor_pos {
+        editor.set_selection_save_col(Selection::single(
+            new_cursor_pos.with_column(
+                new_cursor_pos
+                    .column
+                    .min(editor_content.line_len(new_cursor_pos.row) - 1),
+            ),
+        ));
+    }
+    editor.blink_cursor();
+}
+
 fn get_scroll_y_after_cursor_movement(
     prev_row: usize,
     current_row: usize,
