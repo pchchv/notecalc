@@ -296,6 +296,48 @@ pub fn try_extract_function_def<'b>(
     return Some(fd);
 }
 
+fn get_scroll_y_after_cursor_movement(
+    prev_row: usize,
+    current_row: usize,
+    render_data: &GlobalRenderData,
+) -> Option<usize> {
+    if prev_row != current_row {
+        if current_row < render_data.scroll_y {
+            // scroll up
+            Some(current_row)
+        } else {
+            // scroll down
+            // if the new pos is 5. line and its height is 1, this var is 6
+            let new_pos_bottom_y =
+                if let Some(new_row_y) = render_data.get_render_y(content_y(current_row)) {
+                    let new_h = render_data.get_rendered_height(content_y(current_row));
+                    new_row_y.add(new_h)
+                } else {
+                    // find the last rendered line at the bottom
+                    let mut assumed_heights = 1;
+                    let mut prev_row_y = None;
+                    let mut prev_row_i = current_row as isize - 1;
+                    while prev_row_y.is_none() && prev_row_i >= 0 {
+                        prev_row_y = render_data.get_render_y(content_y(prev_row_i as usize));
+                        assumed_heights += 1;
+                        prev_row_i -= 1;
+                    }
+                    // we assume that the non-yet-rendered lines' height will be 1
+                    prev_row_y.unwrap_or(canvas_y(0)).add(assumed_heights)
+                };
+            let new_scroll_y = new_pos_bottom_y.as_isize() + render_data.scroll_y as isize
+                - (render_data.client_height as isize);
+            if new_scroll_y > render_data.scroll_y as isize {
+                Some(new_scroll_y as usize)
+            } else {
+                None
+            }
+        }
+    } else {
+        None
+    }
+}
+
 fn set_editor_and_result_panel_widths(
     client_width: usize,
     result_panel_width_percent: usize,
