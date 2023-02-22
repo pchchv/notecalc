@@ -1439,6 +1439,26 @@ impl MatrixEditing {
     }
 }
 
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+pub enum EditorObjectType {
+    Matrix { row_count: usize, col_count: usize },
+    LineReference { var_index: usize },
+    Variable { var_index: usize },
+    SimpleTokens,
+}
+
+#[derive(Clone, Debug)]
+pub struct EditorObject {
+    pub typ: EditorObjectType,
+    pub row: ContentIndex,
+    pub start_x: usize,
+    pub end_x: usize,
+    pub rendered_x: usize,
+    pub rendered_y: CanvasY,
+    pub rendered_w: usize,
+    pub rendered_h: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct Variable {
     pub name: Box<[char]>,
