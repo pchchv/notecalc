@@ -276,6 +276,3462 @@ pub enum Click {
     Drag(Pos),
 }
 
+pub struct NoteCalcApp {
+    pub result_panel_width_percent: usize,
+    pub editor: Editor<LineData>,
+    pub editor_content: EditorContent<LineData>,
+    pub matrix_editing: Option<MatrixEditing>,
+    pub line_reference_chooser: Option<ContentIndex>,
+    pub line_id_generator: usize,
+    pub mouse_state: Option<MouseClickType>,
+    pub mouse_hover_type: MouseHoverType,
+    pub updated_line_ref_obj_indices: Vec<EditorObjId>,
+    pub render_data: GlobalRenderData,
+    // when pressing Ctrl-c without any selection, the result of the current line will be put into this clipboard
+    pub clipboard: Option<String>,
+}
+
+impl NoteCalcApp {
+    pub fn new(client_width: usize, client_height: usize) -> NoteCalcApp {
+        let mut editor_content = EditorContent::new(MAX_EDITOR_WIDTH, MAX_LINE_COUNT);
+        NoteCalcApp {
+            line_reference_chooser: None,
+            result_panel_width_percent: DEFAULT_RESULT_PANEL_WIDTH_PERCENT,
+            editor: Editor::new(&mut editor_content),
+            editor_content,
+            matrix_editing: None,
+            line_id_generator: 1,
+            mouse_state: None,
+            mouse_hover_type: MouseHoverType::Normal,
+            updated_line_ref_obj_indices: Vec::with_capacity(16),
+            render_data: GlobalRenderData::new(
+                client_width,
+                client_height,
+                default_result_gutter_x(client_width),
+                LEFT_GUTTER_MIN_WIDTH,
+                RIGHT_GUTTER_WIDTH,
+            ),
+            clipboard: None,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.line_reference_chooser = None;
+        self.matrix_editing = None;
+        self.line_id_generator = 1;
+        self.mouse_hover_type = MouseHoverType::Normal;
+        self.updated_line_ref_obj_indices.clear();
+        self.clipboard = None;
+        self.render_data = GlobalRenderData::new(
+            self.render_data.client_width,
+            self.render_data.client_height,
+            default_result_gutter_x(self.render_data.client_width),
+            LEFT_GUTTER_MIN_WIDTH,
+            RIGHT_GUTTER_WIDTH,
+        );
+        self.editor.reset();
+        self.editor_content.init_with("");
+    }
+
+    pub fn get_selected_text_and_clear_app_clipboard(&mut self) -> Option<String> {
+        // TODO: use fix buffer don't allocate
+        let mut str = String::with_capacity(64);
+        return if let Some(clipboard) = std::mem::replace(&mut self.clipboard, None) {
+            Some(clipboard)
+        } else if let Some(matrix_editing) = &self.matrix_editing {
+            matrix_editing
+                .editor_content
+                .write_selection_into(matrix_editing.editor.get_selection(), &mut str);
+            Some(str)
+        } else if self.editor.get_selection().is_range() {
+            self.editor_content
+                .write_selection_into(self.editor.get_selection(), &mut str);
+            Some(str)
+        } else if !self.editor.clipboard.is_empty() {
+            Some(std::mem::replace(&mut self.editor.clipboard, String::new()))
+        } else {
+            None
+        };
+    }
+
+    pub fn set_normalized_content<'b>(
+        &mut self,
+        mut text: &str,
+        units: &Units,
+        allocator: &'b Bump,
+        tokens: &mut AppTokens<'b>,
+        results: &mut Results,
+        vars: &mut Variables,
+        func_defs: &mut FunctionDefinitions<'b>,
+        editor_objs: &mut EditorObjects,
+        render_buckets: &mut RenderBuckets<'b>,
+    ) {
+        let content_is_empty = text.is_empty();
+        if content_is_empty {
+            text = EMPTY_FILE_DEFUALT_CONTENT;
+        }
+        let prev_line_count = self.editor_content.line_count();
+        self.editor_content.init_with(text);
+        self.editor.set_cursor_pos_r_c(0, 0);
+        for (i, data) in self.editor_content.data_mut().iter_mut().enumerate() {
+            data.line_id = i + 1;
+        }
+        self.line_id_generator = self.editor_content.line_count() + 1;
+
+        self.matrix_editing = None;
+        self.line_reference_chooser = None;
+        self.mouse_state = None;
+        self.mouse_hover_type = MouseHoverType::Normal;
+        self.updated_line_ref_obj_indices.clear();
+        self.clipboard = None;
+
+        for r in results.as_mut_slice() {
+            *r = Ok(None)
+        }
+        for v in vars.iter_mut() {
+            *v = None;
+        }
+        vars[SUM_VARIABLE_INDEX] = Some(Variable {
+            name: Box::from(&['s', 'u', 'm'][..]),
+            value: Err(()),
+        });
+        self.render_data.clear();
+        self.process_and_render_tokens(
+            RowModificationType::AllLinesFrom(0),
+            units,
+            allocator,
+            tokens,
+            results,
+            vars,
+            func_defs,
+            editor_objs,
+            render_buckets,
+            prev_line_count,
+        );
+        if !content_is_empty {
+            self.set_editor_and_result_panel_widths_wrt_editor_and_rerender_if_necessary(
+                units,
+                render_buckets,
+                allocator,
+                _readonly_(tokens),
+                _readonly_(results),
+                _readonly_(vars),
+                _readonly_(func_defs),
+                editor_objs,
+            );
+        }
+    }
+
+    pub fn calc_full_content_height(gr: &GlobalRenderData, content_len: usize) -> usize {
+        // TODO csak az utolsó sorig iterálj, gr.be asszem letárolom
+        let mut h = 0;
+        for i in 0..content_len.min(MAX_LINE_COUNT) {
+            let editor_y = content_y(i);
+            if gr.is_visible(editor_y) {
+                h += gr.get_rendered_height(editor_y);
+            } else if gr.get_render_y(editor_y).is_some() {
+                h += 1;
+            }
+        }
+        h
+    }
+
+    pub fn renderr<'b>(
+        editor: &mut Editor<LineData>,
+        editor_content: &EditorContent<LineData>,
+        units: &Units,
+        matrix_editing: &mut Option<MatrixEditing>,
+        line_reference_chooser: &mut Option<ContentIndex>,
+        render_buckets: &mut RenderBuckets<'b>,
+        result_change_flag: BitFlag256,
+        gr: &mut GlobalRenderData,
+        allocator: &'b Bump,
+        apptokens: &AppTokens<'b>,
+        results: &Results,
+        vars: &Variables,
+        func_defs: &FunctionDefinitions<'b>,
+        editor_objs: &mut EditorObjects,
+        updated_line_ref_obj_indices: &[EditorObjId],
+        mouse_hover_type: MouseHoverType,
+    ) {
+        let theme = &THEMES[gr.theme_index];
+        gr.longest_visible_editor_line_len = 0;
+
+        // result background
+        render_buckets.result_panel_bg = Rect {
+            x: (gr.result_gutter_x + RIGHT_GUTTER_WIDTH) as u16,
+            y: 0,
+            w: gr.current_result_panel_width as u16,
+            h: gr.client_height as u16,
+        };
+
+        // result gutter
+        render_buckets.right_gutter_bg = Rect {
+            x: gr.result_gutter_x as u16,
+            y: 0,
+            w: RIGHT_GUTTER_WIDTH as u16,
+            h: gr.client_height as u16,
+        };
+
+        // left gutter
+        render_buckets.left_gutter_bg = Rect {
+            x: 0,
+            y: 0,
+            w: gr.left_gutter_width as u16,
+            h: gr.client_height as u16,
+        };
+
+        // x, h
+        let mut editor_y_to_render_w: [usize; MAX_LINE_COUNT] = [0; MAX_LINE_COUNT];
+        {
+            let mut r = PerLineRenderData::new();
+            r.render_y = canvas_y(-(gr.scroll_y as isize));
+            gr.clear_editor_y_to_render_y();
+            for line in editor_content.lines().take(MAX_LINE_COUNT) {
+                r.new_line_started();
+                let editor_y = r.editor_y;
+                {
+                    if gr.scroll_y > editor_y.as_usize()
+                        || editor_y.as_usize() >= gr.scroll_y + gr.client_height
+                    {
+                        gr.set_render_y(editor_y, Some(r.render_y));
+                        r.line_render_ended(1);
+                        continue;
+                    } else if editor_y.as_usize() > 0 {
+                        let prev_editor_y = editor_y.sub(1);
+
+                        if let Some(r_y) = gr.get_render_y(prev_editor_y) {
+                            if r_y.as_isize() + (gr.get_rendered_height(prev_editor_y) as isize)
+                                >= gr.client_height as isize
+                            {
+                                for i in editor_y.as_usize()..MAX_LINE_COUNT {
+                                    gr.set_render_y(content_y(i), Some(r.render_y));
+                                    r.line_render_ended(1);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                let render_y = r.render_y;
+                gr.set_render_y(editor_y, Some(render_y));
+                r.rendered_row_height = gr.get_rendered_height(editor_y);
+                // "- 1" so if it is even, it always appear higher
+                r.vert_align_offset = (r.rendered_row_height - 1) / 2;
+
+                if let Some(tokens) = &apptokens[editor_y] {
+                    let need_matrix_renderer =
+                        if let Some((first, second)) = editor.get_selection().is_range_ordered() {
+                            NOT((first.row..=second.row).contains(&(editor_y.as_usize())))
+                        } else {
+                            true
+                        };
+                    render_tokens(
+                        &tokens.tokens,
+                        &mut r,
+                        gr,
+                        render_buckets,
+                        &mut editor_objs[editor_y],
+                        editor,
+                        matrix_editing,
+                        vars,
+                        &units,
+                        need_matrix_renderer,
+                        Some(RENDERED_RESULT_PRECISION),
+                        theme,
+                    );
+                    highlight_line_ref_background(
+                        &editor_objs[editor_y],
+                        render_buckets,
+                        &r,
+                        gr,
+                        theme,
+                    );
+                    if editor.get_selection().get_cursor_pos().row == r.editor_y.as_usize() {
+                        underline_active_line_refs(&editor_objs[editor_y], render_buckets, gr);
+                    }
+                } else {
+                    r.rendered_row_height = 1;
+                    render_simple_text_line(line, &mut r, gr, render_buckets, allocator);
+                }
+
+                editor_y_to_render_w[r.editor_y.as_usize()] = r.render_x;
+
+                draw_line_ref_chooser(
+                    render_buckets,
+                    &r,
+                    &gr,
+                    &line_reference_chooser,
+                    gr.result_gutter_x,
+                    theme,
+                );
+
+                draw_cursor(render_buckets, &r, &gr, &editor, &matrix_editing, theme);
+
+                draw_right_gutter_num_prefixes(
+                    render_buckets,
+                    gr.result_gutter_x,
+                    &editor_content,
+                    &r,
+                    theme,
+                );
+
+                render_wrap_dots(render_buckets, &r, &gr, theme);
+
+                draw_right_gutter_num_prefixes(
+                    render_buckets,
+                    gr.result_gutter_x,
+                    &editor_content,
+                    &r,
+                    theme,
+                );
+                r.line_render_ended(gr.get_rendered_height(editor_y));
+                gr.longest_visible_editor_line_len =
+                    gr.longest_visible_editor_line_len.max(r.render_x);
+            }
+            #[cfg(debug_assertions)]
+            {
+                let chars = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+                for i in 0..(gr.left_gutter_width
+                    + (gr.current_editor_width + 1)
+                    + RIGHT_GUTTER_WIDTH
+                    + gr.current_result_panel_width)
+                {
+                    let d = i + 1;
+                    render_buckets.draw_char(Layer::AboveText, i, canvas_y(0), chars[d % 10]);
+                    if d % 10 == 0 && d < 100 {
+                        render_buckets.draw_char(Layer::AboveText, i, canvas_y(1), chars[d / 10]);
+                    }
+                }
+            }
+        }
+
+        let mut cursor_inside_function_body = false;
+        // render function background fn bg
+        {
+            let cursor_row = editor.get_selection().get_cursor_pos().row;
+            render_buckets.set_color(Layer::BehindTextBehindCursor, theme.func_bg);
+            let mut i = gr.scroll_y;
+            let to = (i + gr.client_height).min(MAX_LINE_COUNT);
+            while i < to {
+                if let Some(fd) = func_defs[i].as_ref() {
+                    let mut rendered_h = 1;
+                    for j in fd.first_row_index.add(1).as_usize()..=fd.last_row_index.as_usize() {
+                        rendered_h += gr.get_rendered_height(content_y(j));
+                    }
+                    render_buckets.draw_rect(
+                        Layer::BehindTextBehindCursor,
+                        gr.left_gutter_width,
+                        gr.get_render_y(content_y(i - gr.scroll_y)).expect("must"),
+                        gr.current_editor_width,
+                        rendered_h,
+                    );
+
+                    cursor_inside_function_body |= cursor_row >= fd.first_row_index.as_usize()
+                        && cursor_row <= fd.last_row_index.as_usize();
+
+                    i = fd.last_row_index.as_usize() + 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        highlight_current_line(
+            render_buckets,
+            editor,
+            &gr,
+            theme,
+            cursor_inside_function_body,
+        );
+
+        // line numbers
+        {
+            let mut target_y = canvas_y(0);
+            render_buckets.set_color(Layer::Text, theme.line_num_simple);
+            for i in 0..gr.client_height {
+                let y = gr.scroll_y + i;
+                if y >= MAX_LINE_COUNT {
+                    break;
+                }
+                if y == editor.get_selection().get_cursor_pos().row {
+                    render_buckets.set_color(Layer::Text, theme.line_num_active);
+                }
+
+                let row_height = gr.get_rendered_height(content_y(y)).max(1);
+                let vert_align_offset = (row_height - 1) / 2;
+                let line_num_str = if y < 9 {
+                    &(LINE_NUM_CONSTS[y][..])
+                } else if y < 99 {
+                    &(LINE_NUM_CONSTS2[y - 9][..])
+                } else {
+                    &(LINE_NUM_CONSTS3[y - 99][..])
+                };
+
+                render_buckets.draw_text(
+                    Layer::Text,
+                    0,
+                    target_y.add(vert_align_offset),
+                    line_num_str,
+                );
+
+                target_y = target_y.add(row_height);
+                if y == editor.get_selection().get_cursor_pos().row {
+                    render_buckets.set_color(Layer::Text, theme.line_num_simple);
+                }
+            }
+        }
+
+        draw_line_refs_and_vars_referenced_from_cur_row(
+            &editor_objs[content_y(editor.get_selection().get_cursor_pos().row)],
+            gr,
+            render_buckets,
+        );
+
+        render_buckets.scroll_bar = if let Some(scrollbar_info) =
+            NoteCalcApp::get_scrollbar_info(gr, editor_content.line_count())
+        {
+            let color = if mouse_hover_type == MouseHoverType::Scrollbar {
+                theme.scrollbar_hovered
+            } else {
+                theme.scrollbar_normal
+            };
+            Some((
+                color,
+                Rect {
+                    x: (gr.result_gutter_x - SCROLLBAR_WIDTH) as u16,
+                    y: scrollbar_info.scroll_bar_render_y as u16,
+                    w: SCROLLBAR_WIDTH as u16,
+                    h: scrollbar_info.scroll_bar_render_h as u16,
+                },
+            ))
+        } else {
+            None
+        };
+
+        render_selection_and_its_sum(
+            &units,
+            render_buckets,
+            results,
+            &editor,
+            &editor_content,
+            &gr,
+            vars,
+            func_defs,
+            allocator,
+            theme,
+            apptokens,
+        );
+
+        let mut tmp = ResultRender::new(ArrayVec::new());
+
+        render_results_into_buf_and_calc_len(
+            &units,
+            results.as_slice(),
+            &mut tmp,
+            &editor_content,
+            gr,
+            Some(RENDERED_RESULT_PRECISION),
+        );
+        tmp.max_len = create_render_commands_for_results_and_render_matrices(
+            &tmp,
+            units,
+            results.as_slice(),
+            render_buckets,
+            gr,
+            Some(RENDERED_RESULT_PRECISION),
+            theme,
+        )
+        .max(tmp.max_len);
+        gr.longest_visible_result_len = tmp.max_len;
+
+        pulse_changed_results(
+            render_buckets,
+            gr,
+            gr.longest_visible_result_len,
+            &result_change_flag,
+            theme,
+        );
+
+        pulse_modified_line_references(
+            render_buckets,
+            gr,
+            updated_line_ref_obj_indices,
+            editor_objs,
+            theme,
+        );
+    }
+
+    pub fn handle_wheel<'b>(
+        &mut self,
+        dir: usize,
+        editor_objs: &mut EditorObjects,
+        units: &Units,
+        allocator: &'b Bump,
+        tokens: &AppTokens<'b>,
+        results: &Results,
+        vars: &Variables,
+        func_defs: &FunctionDefinitions<'b>,
+        render_buckets: &mut RenderBuckets<'b>,
+    ) -> bool {
+        let has_moved = if dir == 0 && self.render_data.scroll_y > 0 {
+            self.render_data.scroll_y -= 1;
+            true
+        } else if dir == 1 {
+            let content_height = NoteCalcApp::calc_full_content_height(
+                &self.render_data,
+                self.editor_content.line_count(),
+            );
+            if (self.render_data.scroll_y + self.render_data.client_height) < content_height {
+                self.render_data.scroll_y += 1;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if has_moved {
+            self.generate_render_commands_and_fill_editor_objs(
+                units,
+                render_buckets,
+                allocator,
+                tokens,
+                results,
+                vars,
+                func_defs,
+                editor_objs,
+                BitFlag256::empty(),
+            );
+            self.set_editor_and_result_panel_widths_and_rerender_if_necessary(
+                units,
+                render_buckets,
+                allocator,
+                tokens,
+                results,
+                vars,
+                func_defs,
+                editor_objs,
+                BitFlag256::empty(),
+            );
+        }
+        return has_moved;
+    }
+
+    pub fn handle_click<'b>(
+        &mut self,
+        x: usize,
+        clicked_y: CanvasY,
+        editor_objs: &mut EditorObjects,
+        units: &Units,
+        allocator: &'b Bump,
+        tokens: &mut AppTokens<'b>,
+        results: &mut Results,
+        vars: &mut Variables,
+        func_defs: &mut FunctionDefinitions<'b>,
+        render_buckets: &mut RenderBuckets<'b>,
+    ) {
+        let scroll_bar_x = self.render_data.result_gutter_x - SCROLLBAR_WIDTH;
+        if x < self.render_data.left_gutter_width {
+            // clicked on left gutter
+        } else if x < scroll_bar_x {
+            self.handle_editor_area_click(
+                x,
+                clicked_y,
+                editor_objs,
+                units,
+                allocator,
+                tokens,
+                results,
+                vars,
+                func_defs,
+                render_buckets,
+                0,
+            );
+        } else if self.mouse_state.is_none() {
+            self.mouse_state = if x - scroll_bar_x < SCROLLBAR_WIDTH {
+                Some(MouseClickType::ClickedInScrollBar {
+                    original_click_y: clicked_y,
+                    original_scroll_y: self.render_data.scroll_y,
+                })
+            } else if x - self.render_data.result_gutter_x < RIGHT_GUTTER_WIDTH {
+                Some(MouseClickType::RightGutterIsDragged)
+            } else {
+                // clicked in result
+                if let Some(editor_y) = self.rendered_y_to_editor_y(clicked_y) {
+                    self.insert_line_ref(
+                        units,
+                        allocator,
+                        tokens,
+                        results,
+                        vars,
+                        func_defs,
+                        editor_y,
+                        editor_objs,
+                        render_buckets,
+                    );
+                }
+                None
+            };
+        }
+    }
+
+    pub fn handle_mouse_up(&mut self) {
+        match self.mouse_state {
+            Some(MouseClickType::RightGutterIsDragged) => {}
+            Some(MouseClickType::ClickedInEditor) => {}
+            Some(MouseClickType::ClickedInScrollBar {
+                original_click_y, ..
+            }) => {
+                let gr = &mut self.render_data;
+                if let Some(scrollbar_render_info) =
+                    NoteCalcApp::get_scrollbar_info(gr, self.editor_content.line_count())
+                {
+                    if original_click_y.as_usize() < scrollbar_render_info.scroll_bar_render_y {
+                        // scroll up
+                        gr.scroll_y -= 1;
+                    } else if original_click_y.as_usize()
+                        > scrollbar_render_info.scroll_bar_render_y
+                            + scrollbar_render_info.scroll_bar_render_h
+                    {
+                        // scroll down
+                        gr.scroll_y += 1;
+                    }
+                }
+            }
+            None => {}
+        }
+        self.mouse_state = None;
+    }
+
+    fn handle_editor_area_click<'b>(
+        &mut self,
+        x: usize,
+        clicked_y: CanvasY,
+        editor_objs: &mut EditorObjects,
+        units: &Units,
+        allocator: &'b Bump,
+        tokens: &mut AppTokens<'b>,
+        results: &mut Results,
+        vars: &mut Variables,
+        func_defs: &mut FunctionDefinitions<'b>,
+        render_buckets: &mut RenderBuckets<'b>,
+        deep: usize,
+    ) {
+        if deep > 1 {
+            return;
+        }
+        let clicked_x = x - self.render_data.left_gutter_width;
+        let clicked_row = self.get_clicked_row_clamped(clicked_y);
+
+        let previously_editing_matrix_row_index = if self.matrix_editing.is_some() {
+            let matrix_row_index = self.matrix_editing.as_ref().unwrap().row_index;
+            end_matrix_editing(
+                &mut self.matrix_editing,
+                &mut self.editor,
+                &mut self.editor_content,
+                None,
+            );
+            Some(matrix_row_index)
+        } else {
+            None
+        };
+
+        let editor_click_pos = if let Some(editor_obj) =
+            self.get_obj_at(clicked_x, clicked_row, clicked_y, editor_objs)
+        {
+            match editor_obj.typ {
+                EditorObjectType::LineReference { .. } => {
+                    Pos::from_row_column(editor_obj.row.as_usize(), editor_obj.end_x)
+                }
+                EditorObjectType::Matrix {
+                    row_count,
+                    col_count,
+                } => {
+                    self.matrix_editing = Some(MatrixEditing::new(
+                        row_count,
+                        col_count,
+                        &self
+                            .editor_content
+                            .get_line_valid_chars(editor_obj.row.as_usize())
+                            [editor_obj.start_x..editor_obj.end_x],
+                        editor_obj.row,
+                        editor_obj.start_x,
+                        editor_obj.end_x,
+                        Pos::from_row_column(0, 0),
+                    ));
+                    Pos::from_row_column(editor_obj.row.as_usize(), editor_obj.start_x + 1)
+                }
+                EditorObjectType::SimpleTokens | EditorObjectType::Variable { .. } => {
+                    let x_pos_within = clicked_x - editor_obj.rendered_x;
+                    Pos::from_row_column(
+                        editor_obj.row.as_usize(),
+                        editor_obj.start_x + x_pos_within,
+                    )
+                }
+            }
+        } else {
+            let eol = self.editor_content.line_len(clicked_row.as_usize());
+            Pos::from_row_column(clicked_row.as_usize(), eol)
+        };
+
+        self.editor.handle_click(
+            editor_click_pos.column,
+            editor_click_pos.row,
+            &self.editor_content,
+        );
+
+        self.editor.blink_cursor();
+
+        if self.mouse_state.is_none() {
+            self.mouse_state = Some(MouseClickType::ClickedInEditor);
+        }
+
+        if let Some(matrix_row_index) = previously_editing_matrix_row_index {
+            self.process_and_render_tokens(
+                RowModificationType::SingleLine(matrix_row_index.as_usize()),
+                units,
+                allocator,
+                tokens,
+                results,
+                vars,
+                func_defs,
+                editor_objs,
+                render_buckets,
+                self.editor_content.line_count(),
+            );
+        } else {
+            self.generate_render_commands_and_fill_editor_objs(
+                units,
+                render_buckets,
+                allocator,
+                tokens,
+                results,
+                vars,
+                func_defs,
+                editor_objs,
+                BitFlag256::empty(),
+            );
+            // if the row containing the matrix has a selection,
+            // the matrix is rendered as plain text,
+            // and clicking inside it put the cursor at the clicked position.
+            // To identify that the matrix is in that position,
+            // we must first render everything (above) that fills editor_objs,
+            // then call the click function again,
+            // now this click will be registered as a click to the matrix,
+            // and mat_edit will be Some
+            self.handle_editor_area_click(
+                x,
+                clicked_y,
+                editor_objs,
+                units,
+                allocator,
+                tokens,
+                results,
+                vars,
+                func_defs,
+                render_buckets,
+                deep + 1,
+            );
+        }
+        self.editor_objs_referencing_current_line_might_changed(
+            tokens,
+            vars,
+            editor_objs,
+            render_buckets,
+        );
+    }
+
+    pub fn rendered_y_to_editor_y(&self, clicked_y: CanvasY) -> Option<ContentIndex> {
+        let editor_y_to_render_y = self.render_data.editor_y_to_render_y();
+        let mut was_visible_row = false;
+        for (ed_y, r_y) in editor_y_to_render_y.iter().enumerate() {
+            if let Some(r_y) = r_y {
+                was_visible_row = true;
+                if *r_y == clicked_y {
+                    return Some(content_y(ed_y));
+                } else if *r_y > clicked_y {
+                    return Some(content_y(ed_y - 1));
+                }
+            } else if was_visible_row {
+                return Some(content_y(ed_y - 1));
+            }
+        }
+        return None;
+    }
+
+    pub fn get_clicked_row_clamped<'a>(&self, render_y: CanvasY) -> ContentIndex {
+        let latest_bottom_i = self
+            .render_data
+            .calc_bottom_y(self.editor_content.line_count().min(MAX_LINE_COUNT - 1));
+        return if render_y >= latest_bottom_i {
+            content_y(self.editor_content.line_count() - 1)
+        } else if let Some(editor_y) = self.rendered_y_to_editor_y(render_y) {
+            editor_y
+        } else {
+            panic!();
+        };
+    }
+
+    pub fn get_obj_at_rendered_pos<'a>(
+        &self,
+        x: usize,
+        render_y: CanvasY,
+        editor_objects: &'a EditorObjects,
+    ) -> Option<&'a EditorObject> {
+        let editor_y = if render_y
+            >= self
+                .render_data
+                .calc_bottom_y(self.editor_content.line_count())
+        {
+            content_y(self.editor_content.line_count() - 1)
+        } else if let Some(editor_y) = self.rendered_y_to_editor_y(render_y) {
+            editor_y
+        } else {
+            return None;
+        };
+        return editor_objects[editor_y].iter().find(|editor_obj| {
+            (editor_obj.rendered_x..editor_obj.rendered_x + editor_obj.rendered_w).contains(&x)
+                && (editor_obj.rendered_y.as_usize()
+                    ..editor_obj.rendered_y.as_usize() + editor_obj.rendered_h)
+                    .contains(&render_y.as_usize())
+        });
+    }
+
+    pub fn get_obj_at<'a>(
+        &self,
+        x: usize,
+        editor_y: ContentIndex,
+        render_y: CanvasY,
+        editor_objects: &'a EditorObjects,
+    ) -> Option<&'a EditorObject> {
+        return editor_objects[editor_y].iter().find(|editor_obj| {
+            (editor_obj.rendered_x..editor_obj.rendered_x + editor_obj.rendered_w).contains(&x)
+                && (editor_obj.rendered_y.as_usize()
+                    ..editor_obj.rendered_y.as_usize() + editor_obj.rendered_h)
+                    .contains(&render_y.as_usize())
+        });
+    }
+
+    pub fn get_obj_at_inside<'a>(
+        &self,
+        x: usize,
+        editor_y: ContentIndex,
+        editor_objects: &'a EditorObjects,
+    ) -> Option<&'a EditorObject> {
+        return editor_objects[editor_y]
+            .iter()
+            .find(|editor_obj| (editor_obj.start_x + 1..editor_obj.end_x).contains(&x));
+    }
+
+    pub fn handle_mouse_move<'b>(
+        &mut self,
+        x: usize,
+        _y: CanvasY,
+        editor_objs: &mut EditorObjects,
+        units: &Units,
+        allocator: &'b Bump,
+        tokens: &AppTokens<'b>,
+        results: &Results,
+        vars: &Variables,
+        func_defs: &FunctionDefinitions<'b>,
+        render_buckets: &mut RenderBuckets<'b>,
+    ) -> usize {
+        let scroll_bar_x = self.render_data.result_gutter_x - SCROLLBAR_WIDTH;
+        let new_mouse_state = if x < self.render_data.left_gutter_width {
+            MouseHoverType::Normal
+        } else if x < scroll_bar_x {
+            // editor
+            MouseHoverType::Normal
+        } else if (x as isize - scroll_bar_x as isize) < (SCROLLBAR_WIDTH as isize) {
+            MouseHoverType::Scrollbar
+        } else if (x as isize - self.render_data.result_gutter_x as isize)
+            < (RIGHT_GUTTER_WIDTH as isize)
+        {
+            MouseHoverType::RightGutter
+        } else {
+            // result
+            return MouseHoverType::Result as usize;
+        };
+        if self.mouse_hover_type != new_mouse_state {
+            self.mouse_hover_type = new_mouse_state;
+            self.generate_render_commands_and_fill_editor_objs(
+                units,
+                render_buckets,
+                allocator,
+                tokens,
+                results,
+                vars,
+                func_defs,
+                editor_objs,
+                BitFlag256::empty(),
+            );
+        }
+        return self.mouse_hover_type as usize;
+    }
+
+    pub fn handle_drag<'b>(
+        &mut self,
+        x: usize,
+        y: CanvasY,
+        editor_objs: &mut EditorObjects,
+        units: &Units,
+        allocator: &'b Bump,
+        tokens: &AppTokens<'b>,
+        results: &Results,
+        vars: &Variables,
+        func_defs: &FunctionDefinitions<'b>,
+        render_buckets: &mut RenderBuckets<'b>,
+    ) -> bool {
+        let need_render = match self.mouse_state {
+            Some(MouseClickType::RightGutterIsDragged) => {
+                let x_bounded = x.max(self.render_data.left_gutter_width + 4);
+                let client_width = self.render_data.client_width;
+                let new_result_panel_width_percent =
+                    (client_width - x_bounded) * 100 / client_width;
+                self.result_panel_width_percent = new_result_panel_width_percent;
+                set_editor_and_result_panel_widths(
+                    client_width,
+                    self.result_panel_width_percent,
+                    &mut self.render_data,
+                );
+                true
+            }
+            Some(MouseClickType::ClickedInEditor) => {
+                if let Some(y) = self.rendered_y_to_editor_y(y) {
+                    self.editor.handle_drag(
+                        (x as isize - self.render_data.left_gutter_width as isize).max(0) as usize,
+                        y.as_usize(),
+                        &self.editor_content,
+                    );
+                    self.editor.blink_cursor();
+                    true
+                } else {
+                    false
+                }
+            }
+            Some(MouseClickType::ClickedInScrollBar {
+                original_click_y,
+                original_scroll_y,
+            }) => {
+                let gr = &mut self.render_data;
+                if let Some(scrollbar_info) =
+                    NoteCalcApp::get_scrollbar_info(gr, self.editor_content.line_count())
+                {
+                    let delta_y = y.as_isize() - original_click_y.as_isize();
+                    gr.scroll_y = ((original_scroll_y as isize + delta_y).max(0) as usize)
+                        .min(scrollbar_info.max_scroll_y);
+
+                    true
+                } else {
+                    false
+                }
+            }
+            None => false,
+        };
+        if need_render {
+            self.generate_render_commands_and_fill_editor_objs(
+                units,
+                render_buckets,
+                allocator,
+                tokens,
+                results,
+                vars,
+                func_defs,
+                editor_objs,
+                BitFlag256::empty(),
+            );
+            self.editor_objs_referencing_current_line_might_changed(
+                tokens,
+                vars,
+                editor_objs,
+                render_buckets,
+            );
+        }
+        return need_render;
+    }
+
+    fn get_scrollbar_info(
+        gr: &GlobalRenderData,
+        content_len: usize,
+    ) -> Option<ScrollBarRenderInfo> {
+        let content_height = NoteCalcApp::calc_full_content_height(gr, content_len);
+        let max_scroll_y = content_height as isize - gr.client_height as isize;
+        if max_scroll_y > 0 {
+            let max_scroll_y = max_scroll_y as usize;
+            let scroll_bar_h = (gr.client_height as isize - max_scroll_y as isize).max(1) as usize;
+            let scroll_bar_y = if scroll_bar_h > 1 {
+                gr.scroll_y
+            } else {
+                ((gr.scroll_y as f64 / (max_scroll_y + 1) as f64) * gr.client_height as f64)
+                    as usize
+            };
+            Some(ScrollBarRenderInfo {
+                scroll_bar_render_y: scroll_bar_y,
+                scroll_bar_render_h: scroll_bar_h,
+                max_scroll_y,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn set_theme<'b>(
+        &mut self,
+        new_theme_index: usize,
+        editor_objs: &mut EditorObjects,
+        units: &Units,
+        allocator: &'b Bump,
+        tokens: &AppTokens<'b>,
+        results: &Results,
+        vars: &Variables,
+        func_defs: &FunctionDefinitions<'b>,
+        render_buckets: &mut RenderBuckets<'b>,
+    ) {
+        self.render_data.theme_index = new_theme_index;
+        self.generate_render_commands_and_fill_editor_objs(
+            units,
+            render_buckets,
+            allocator,
+            tokens,
+            results,
+            vars,
+            func_defs,
+            editor_objs,
+            BitFlag256::empty(),
+        );
+    }
+
+    pub fn handle_resize<'b>(
+        &mut self,
+        new_client_width: usize,
+        editor_objs: &mut EditorObjects,
+        units: &Units,
+        allocator: &'b Bump,
+        tokens: &AppTokens<'b>,
+        results: &Results,
+        vars: &Variables,
+        func_defs: &FunctionDefinitions<'b>,
+        render_buckets: &mut RenderBuckets<'b>,
+    ) {
+        if new_client_width
+            < LEFT_GUTTER_MIN_WIDTH + RIGHT_GUTTER_WIDTH + MIN_RESULT_PANEL_WIDTH + SCROLLBAR_WIDTH
+        {
+            return;
+        }
+        self.render_data.client_width = new_client_width;
+        set_editor_and_result_panel_widths(
+            new_client_width,
+            self.result_panel_width_percent,
+            &mut self.render_data,
+        );
+        self.generate_render_commands_and_fill_editor_objs(
+            units,
+            render_buckets,
+            allocator,
+            tokens,
+            results,
+            vars,
+            func_defs,
+            editor_objs,
+            BitFlag256::empty(),
+        );
+    }
+
+    pub fn handle_time<'b>(
+        &mut self,
+        now: u32,
+        units: &Units,
+        allocator: &'b Bump,
+        tokens: &AppTokens<'b>,
+        results: &Results,
+        vars: &Variables,
+        func_defs: &FunctionDefinitions<'b>,
+        editor_objs: &mut EditorObjects,
+        render_buckets: &mut RenderBuckets<'b>,
+    ) -> bool {
+        let need_rerender = if let Some(mat_editor) = &mut self.matrix_editing {
+            mat_editor.editor.handle_tick(now)
+        } else {
+            self.editor.handle_tick(now)
+        };
+        if need_rerender {
+            self.generate_render_commands_and_fill_editor_objs(
+                units,
+                render_buckets,
+                allocator,
+                tokens,
+                results,
+                vars,
+                func_defs,
+                editor_objs,
+                BitFlag256::empty(),
+            );
+        }
+        need_rerender
+    }
+
+    pub fn get_line_ref_normalized_content(&self) -> String {
+        let mut result: String = String::with_capacity(self.editor_content.line_count() * 40);
+        for line in self.editor_content.lines() {
+            let mut i = 0;
+            'i: while i < line.len() {
+                if i + 3 < line.len() && line[i] == '&' && line[i + 1] == '[' {
+                    let mut end = i + 2;
+                    let mut num: u32 = 0;
+                    while end < line.len() {
+                        if line[end] == ']' && num > 0 {
+                            // which row has the id of 'num'?
+                            let referenced_row_index = self
+                                .editor_content
+                                .data()
+                                .iter()
+                                .position(|it| it.line_id == num as usize)
+                                .unwrap_or(0)
+                                + 1; // '+1' line id cannot be 0
+                            result.push('&');
+                            result.push('[');
+                            {
+                                let mut tmp_arr = ['0', '0', '0'];
+                                let mut tmp_rev_index = 3;
+                                let mut line_id = referenced_row_index;
+                                while line_id > 0 {
+                                    tmp_rev_index -= 1;
+                                    let to_insert = line_id % 10;
+                                    tmp_arr[tmp_rev_index] = (48 + to_insert as u8) as char;
+                                    line_id /= 10;
+                                }
+                                for i in tmp_rev_index..=2 {
+                                    result.push(tmp_arr[i]);
+                                }
+                            }
+                            result.push(']');
+                            i = end + 1;
+                            continue 'i;
+                        } else if let Some(digit) = line[end].to_digit(10) {
+                            num = if num == 0 { digit } else { num * 10 + digit };
+                        } else {
+                            break;
+                        }
+                        end += 1;
+                    }
+                }
+                result.push(line[i]);
+                i += 1;
+            }
+            result.push('\n');
+        }
+
+        return result;
+    }
+
+    pub fn normalize_line_refs_in_place(&mut self) {
+        let mut original_selection = self.editor.get_selection();
+        let editor_content = &mut self.editor_content;
+        for line_i in 0..editor_content.line_count() {
+            let mut i = 0;
+            'i: while i < editor_content.line_len(line_i) {
+                let start = i;
+                if i + 3 < editor_content.line_len(line_i)
+                    && editor_content.get_char(line_i, i) == '&'
+                    && editor_content.get_char(line_i, i + 1) == '['
+                {
+                    let mut end = i + 2;
+                    let mut num_inside_lineref: u32 = 0;
+                    while end < editor_content.line_len(line_i) {
+                        if editor_content.get_char(line_i, end) == ']' && num_inside_lineref > 0 {
+                            let num_len = end - (start + 2); // start --> &[num] <- end
+
+                            // remove the number from the original line_ref text '&[x]' (remove only x)
+                            {
+                                let start_pos = Pos::from_row_column(line_i, start + 2);
+                                let end_pos = start_pos.with_column(end);
+                                self.editor.set_cursor_range(start_pos, end_pos);
+                                self.editor.handle_input_no_undo(
+                                    EditorInputEvent::Del,
+                                    InputModifiers::none(),
+                                    editor_content,
+                                );
+                            }
+                            {
+                                // which row has the id of 'num_inside_lineref'?
+                                let referenced_row_index = editor_content
+                                    .data()
+                                    .iter()
+                                    .position(|it| it.line_id == num_inside_lineref as usize)
+                                    .unwrap_or(0)
+                                    + 1; // '+1' line id cannot be 0
+                                         // TODO: change this code if 64/99/etc line count limit is removed
+                                let mut tmp_arr = ['0', '0', '0'];
+                                let mut tmp_rev_index = 3;
+                                let mut line_id = referenced_row_index;
+                                while line_id > 0 {
+                                    tmp_rev_index -= 1;
+
+                                    let to_insert = line_id % 10;
+                                    tmp_arr[tmp_rev_index] = (48 + to_insert as u8) as char;
+                                    line_id /= 10;
+                                }
+
+                                i = start + 2;
+                                let mut align_selection = 0;
+                                if line_i == original_selection.start.row
+                                    && original_selection.start.column >= i
+                                {
+                                    original_selection.start.column -= num_len;
+                                    align_selection |= 1;
+                                }
+                                if let Some(end) = original_selection.end {
+                                    if line_i == end.row && end.column >= i {
+                                        original_selection.end.as_mut().expect("must").column -=
+                                            num_len;
+                                        align_selection |= 2;
+                                    }
+                                };
+                                for tmp_arr_i in tmp_rev_index..=2 {
+                                    self.editor.handle_input_no_undo(
+                                        EditorInputEvent::Char(tmp_arr[tmp_arr_i]),
+                                        InputModifiers::none(),
+                                        editor_content,
+                                    );
+                                    i += 1;
+                                    if (align_selection & 1) > 0 {
+                                        original_selection.start.column += 1;
+                                    }
+                                    if (align_selection & 2) > 0 {
+                                        original_selection.end.as_mut().expect("must").column += 1;
+                                    }
+                                }
+                                i += 1; // skip ']'
+                            }
+                            continue 'i;
+                        } else if let Some(digit) =
+                            editor_content.get_char(line_i, end).to_digit(10)
+                        {
+                            num_inside_lineref = if num_inside_lineref == 0 {
+                                digit
+                            } else {
+                                num_inside_lineref * 10 + digit
+                            };
+                        } else {
+                            break;
+                        }
+                        end += 1;
+                    }
+                }
+                i += 1;
+            }
+        }
+        for line_i in 0..editor_content.line_count() {
+            editor_content.mut_data(line_i).line_id = line_i + 1;
+        }
+        self.line_id_generator = editor_content.line_count() + 1;
+
+        self.editor.set_selection_save_col(original_selection);
+    }
+
+    pub fn alt_key_released<'b>(
+        &mut self,
+        units: &Units,
+        allocator: &'b Bump,
+        tokens: &mut AppTokens<'b>,
+        results: &mut Results,
+        vars: &mut Variables,
+        func_defs: &mut FunctionDefinitions<'b>,
+        editor_objs: &mut EditorObjects,
+        render_buckets: &mut RenderBuckets<'b>,
+    ) {
+        if let Some(line_ref_row) = self.line_reference_chooser {
+            self.line_reference_chooser = None;
+            self.insert_line_ref(
+                units,
+                allocator,
+                tokens,
+                results,
+                vars,
+                func_defs,
+                line_ref_row,
+                editor_objs,
+                render_buckets,
+            );
+        } else {
+            return;
+        }
+    }
+
+    fn insert_line_ref<'b>(
+        &mut self,
+        units: &Units,
+        allocator: &'b Bump,
+        tokens: &mut AppTokens<'b>,
+        results: &mut Results,
+        vars: &mut Variables,
+        func_defs: &mut FunctionDefinitions<'b>,
+        line_ref_row: ContentIndex,
+        editor_objs: &mut EditorObjects,
+        render_buckets: &mut RenderBuckets<'b>,
+    ) {
+        let cursor_row = self.editor.get_selection().get_cursor_pos().row;
+        let allowed_from_func_perspective = match (
+            get_function_index_for_line(cursor_row, _readonly_(func_defs)),
+            get_function_index_for_line(line_ref_row.as_usize(), _readonly_(func_defs)),
+        ) {
+            (Some(i), Some(j)) if i == j => {
+                // they are in same func
+                true
+            }
+            (Some(_), None) => {
+                // insert lineref from global scope to function
+                true
+            }
+            (None, None) => {
+                // insert lineref from global scope to global scope
+                true
+            }
+            _ => false,
+        };
+        if cursor_row == line_ref_row.as_usize()
+            || matches!(&results[line_ref_row], Err(_) | Ok(None))
+            || NOT(allowed_from_func_perspective)
+        {
+            self.generate_render_commands_and_fill_editor_objs(
+                units,
+                render_buckets,
+                allocator,
+                _readonly_(tokens),
+                _readonly_(results),
+                _readonly_(vars),
+                _readonly_(func_defs),
+                editor_objs,
+                BitFlag256::empty(),
+            );
+            return;
+        }
+        if let Some(var) = &vars[line_ref_row.as_usize()] {
+            let pos = self.editor.get_selection().get_cursor_pos();
+            if pos.column > 0 {
+                let prev_ch = self.editor_content.get_char(pos.row, pos.column - 1);
+                let prev_token_is_lineref = pos.column > 3 /* smallest lineref is 4 char long '&[1]'*/
+                        && self.editor_content.get_char(pos.row, pos.column - 1) == ']' && {
+                        let mut i = (pos.column - 2) as isize;
+                        while i > 1 {
+                            if NOT(self.editor_content.get_char(pos.row, i as usize).is_ascii_digit()) {
+                                break;
+                            }
+                            i -= 1;
+                        }
+                        i > 0
+                            && self.editor_content.get_char(pos.row, i as usize) == '['
+                            && self.editor_content.get_char(pos.row, (i - 1) as usize) == '&'
+                    };
+                if prev_ch.is_alphanumeric() || prev_ch == '_' || prev_token_is_lineref {
+                    self.editor.handle_input_undoable(
+                        EditorInputEvent::Char(' '),
+                        InputModifiers::none(),
+                        &mut self.editor_content,
+                    );
+                }
+            }
+            for ch in var.name.iter() {
+                self.editor.handle_input_undoable(
+                    EditorInputEvent::Char(*ch),
+                    InputModifiers::none(),
+                    &mut self.editor_content,
+                );
+            }
+        } else {
+            let line_id = {
+                let line_data = self.editor_content.get_data(line_ref_row.as_usize());
+                line_data.line_id
+            };
+
+            let inserting_text = format!("&[{}]", line_id);
+            self.editor
+                .insert_text_undoable(&inserting_text, &mut self.editor_content);
+        }
+
+        self.process_and_render_tokens(
+            RowModificationType::SingleLine(cursor_row),
+            units,
+            allocator,
+            tokens,
+            results,
+            vars,
+            func_defs,
+            editor_objs,
+            render_buckets,
+            self.editor_content.line_count(),
+        );
+    }
+
+    pub fn handle_paste<'b>(
+        &mut self,
+        text: String,
+        units: &Units,
+        allocator: &'b Bump,
+        tokens: &mut AppTokens<'b>,
+        results: &mut Results,
+        vars: &mut Variables,
+        func_defs: &mut FunctionDefinitions<'b>,
+        editor_objs: &mut EditorObjects,
+        render_buckets: &mut RenderBuckets<'b>,
+    ) {
+        let prev_row = self.editor.get_selection().get_cursor_pos().row;
+        let prev_line_count = self.editor_content.line_count();
+        match self
+            .editor
+            .insert_text_undoable(&text, &mut self.editor_content)
+        {
+            Some(modif) => {
+                if self.editor.get_selection().get_cursor_pos().row >= MAX_LINE_COUNT {
+                    self.editor.set_cursor_pos_r_c(MAX_LINE_COUNT - 1, 0);
+                }
+                let cursor_pos = self.editor.get_selection().get_cursor_pos();
+                let scroll_y =
+                    get_scroll_y_after_cursor_movement(prev_row, cursor_pos.row, &self.render_data);
+                if let Some(scroll_y) = scroll_y {
+                    self.render_data.scroll_y = scroll_y;
+                }
+                self.process_and_render_tokens(
+                    modif,
+                    units,
+                    allocator,
+                    tokens,
+                    results,
+                    vars,
+                    func_defs,
+                    editor_objs,
+                    render_buckets,
+                    prev_line_count,
+                );
+            }
+            None => {}
+        };
+    }
+
+    pub fn reparse_everything<'b, 'q>(
+        &'q mut self,
+        allocator: &'b Bump,
+        units: &Units,
+        tokens: &mut AppTokens<'b>,
+        results: &mut Results,
+        vars: &mut Variables,
+        func_defs: &mut FunctionDefinitions<'b>,
+        editor_objs: &mut EditorObjects,
+        render_buckets: &mut RenderBuckets<'b>,
+    ) {
+        self.process_and_render_tokens(
+            RowModificationType::AllLinesFrom(0),
+            units,
+            allocator,
+            tokens,
+            results,
+            vars,
+            func_defs,
+            editor_objs,
+            render_buckets,
+            self.editor_content.line_count(),
+        );
+    }
+
+    pub fn handle_input<'b, 'q>(
+        &'q mut self,
+        input: EditorInputEvent,
+        modifiers: InputModifiers,
+        allocator: &'b Bump,
+        units: &Units,
+        tokens: &mut AppTokens<'b>,
+        results: &mut Results,
+        vars: &mut Variables,
+        func_defs: &mut FunctionDefinitions<'b>,
+        editor_objs: &mut EditorObjects,
+        render_buckets: &mut RenderBuckets<'b>,
+    ) -> Option<RowModificationType> {
+        let _span = tracy_span("handle_input", file!(), line!());
+        fn handle_input_with_alt<'b>(
+            app: &mut NoteCalcApp,
+            input: EditorInputEvent,
+        ) -> Option<RowModificationType> {
+            if input == EditorInputEvent::Left {
+                let selection = app.editor.get_selection();
+                let (start, end) = selection.get_range_ordered();
+                for row_i in start.row..=end.row {
+                    let new_format = match &app.editor_content.get_data(row_i).result_format {
+                        ResultFormat::Bin => ResultFormat::Hex,
+                        ResultFormat::Dec => ResultFormat::Bin,
+                        ResultFormat::Hex => ResultFormat::Dec,
+                    };
+                    app.editor_content.mut_data(row_i).result_format = new_format;
+                }
+                None
+            } else if input == EditorInputEvent::Right {
+                let selection = app.editor.get_selection();
+                let (start, end) = selection.get_range_ordered();
+                for row_i in start.row..=end.row {
+                    let new_format = match &app.editor_content.get_data(row_i).result_format {
+                        ResultFormat::Bin => ResultFormat::Dec,
+                        ResultFormat::Dec => ResultFormat::Hex,
+                        ResultFormat::Hex => ResultFormat::Bin,
+                    };
+                    app.editor_content.mut_data(row_i).result_format = new_format;
+                }
+                None
+            } else if input == EditorInputEvent::Up {
+                let cur_pos = app.editor.get_selection().get_cursor_pos();
+                let rows = if let Some(selector_row) = app.line_reference_chooser {
+                    if selector_row.as_usize() > 0 {
+                        Some((selector_row.as_usize(), selector_row.as_usize() - 1))
+                    } else {
+                        Some((selector_row.as_usize(), selector_row.as_usize()))
+                    }
+                } else if cur_pos.row > 0 {
+                    Some((cur_pos.row - 1, cur_pos.row - 1))
+                } else {
+                    None
+                };
+                if let Some((_, new_selected_row)) = rows {
+                    app.line_reference_chooser = Some(content_y(new_selected_row));
+                    None
+                } else {
+                    None
+                }
+            } else if input == EditorInputEvent::Down {
+                let cur_pos = app.editor.get_selection().get_cursor_pos();
+                let rows = if let Some(selector_row) = app.line_reference_chooser {
+                    if selector_row.as_usize() < cur_pos.row - 1 {
+                        Some((selector_row.as_usize(), selector_row.as_usize() + 1))
+                    } else {
+                        Some((selector_row.as_usize(), selector_row.as_usize()))
+                    }
+                } else {
+                    None
+                };
+                if let Some((_prev_selected_row, new_selected_row)) = rows {
+                    app.line_reference_chooser = Some(content_y(new_selected_row));
+                    None
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+
+        let prev_line_count = self.editor_content.line_count();
+        let prev_selection = self.editor.get_selection();
+        let prev_row = self.editor.get_selection().get_cursor_pos().row;
+        let mut refactor_me = false;
+
+        let modif = if self.matrix_editing.is_none() && modifiers.alt {
+            handle_input_with_alt(&mut *self, input)
+        } else if self.is_matrix_editing_or_need_to_create_one(
+            input,
+            _readonly_(editor_objs),
+            &mut refactor_me,
+        ) {
+            self.handle_matrix_editor_input(input, modifiers);
+            if self.matrix_editing.is_none() {
+                // user left a matrix
+                Some(RowModificationType::AllLinesFrom(prev_row))
+            } else {
+                if modifiers.alt {
+                    let y = content_y(prev_row);
+                    let new_h =
+                        calc_rendered_height(y, &self.matrix_editing, tokens, results, vars);
+                    self.render_data.set_rendered_height(y, new_h);
+                };
+                None
+            }
+        } else if self.handle_completion(&input, editor_objs, _readonly_(vars)) {
+            Some(RowModificationType::SingleLine(prev_row))
+        } else if let Some(modif_type) = self.handle_obj_deletion(&input, editor_objs, modifiers) {
+            Some(modif_type)
+        } else if input == EditorInputEvent::Char('c')
+            && modifiers.ctrl
+            && !self.editor.get_selection().is_range()
+        {
+            let row = self.editor.get_selection().get_cursor_pos().row;
+            if let Ok(Some(result)) = &results[content_y(row)] {
+                self.clipboard = Some(render_result(
+                    &units,
+                    &result,
+                    &self.editor_content.get_data(row).result_format,
+                    false,
+                    Some(RENDERED_RESULT_PRECISION),
+                    true,
+                ));
+            }
+            None
+        } else if input == EditorInputEvent::Char('b') && modifiers.ctrl {
+            self.handle_jump_to_definition(&input, modifiers, editor_objs);
+            None
+        } else if self.handle_obj_jump_over(&input, modifiers, editor_objs) {
+            None
+        } else if self.handle_parenthesis_wrapping(&input) {
+            Some(RowModificationType::AllLinesFrom(
+                prev_selection.get_first().row,
+            ))
+        } else if self.handle_parenthesis_removal(&input) {
+            Some(RowModificationType::SingleLine(
+                prev_selection.get_first().row,
+            ))
+        } else if self.handle_parenthesis_completion(&input) {
+            Some(RowModificationType::SingleLine(
+                prev_selection.get_first().row,
+            ))
+        } else {
+            let prev_cursor_pos = prev_selection.get_cursor_pos();
+
+            let modif_type =
+                self.editor
+                    .handle_input_undoable(input, modifiers, &mut self.editor_content);
+
+            if self.editor.get_selection().get_cursor_pos().row >= MAX_LINE_COUNT {
+                if let Some((start, _end)) = self.editor.get_selection().is_range_ordered() {
+                    self.editor.set_selection_save_col(Selection::range(
+                        start,
+                        Pos::from_row_column(MAX_LINE_COUNT - 1, 0),
+                    ));
+                } else {
+                    self.editor
+                        .set_selection_save_col(Selection::single_r_c(MAX_LINE_COUNT - 1, 0));
+                }
+            }
+
+            let modif_type = if refactor_me {
+                Some(RowModificationType::AllLinesFrom(0))
+            } else {
+                modif_type
+            };
+
+            if modif_type.is_none() {
+                // it is possible to step into a matrix only through navigation
+                self.check_stepping_into_matrix(prev_cursor_pos, editor_objs);
+                // if there was no selection but now there is
+                if !prev_selection.is_range() && self.editor.get_selection().is_range() {
+                    // since the content is modified, it is considered as modification
+                    self.normalize_line_refs_in_place();
+                    Some(RowModificationType::AllLinesFrom(0))
+                } else {
+                    modif_type
+                }
+            } else {
+                modif_type
+            }
+        };
+
+        let cursor_pos = self.editor.get_selection().get_cursor_pos();
+        let scroll_y =
+            get_scroll_y_after_cursor_movement(prev_row, cursor_pos.row, &self.render_data);
+        if let Some(scroll_y) = scroll_y {
+            self.render_data.scroll_y = scroll_y;
+        }
+
+        if let Some(modif) = modif {
+            self.process_and_render_tokens(
+                modif,
+                units,
+                allocator,
+                tokens,
+                results,
+                vars,
+                func_defs,
+                editor_objs,
+                render_buckets,
+                prev_line_count,
+            );
+        } else {
+            self.generate_render_commands_and_fill_editor_objs(
+                units,
+                render_buckets,
+                allocator,
+                _readonly_(tokens),
+                _readonly_(results),
+                _readonly_(vars),
+                _readonly_(func_defs),
+                editor_objs,
+                BitFlag256::empty(),
+            );
+            self.set_editor_and_result_panel_widths_and_rerender_if_necessary(
+                units,
+                render_buckets,
+                allocator,
+                _readonly_(tokens),
+                _readonly_(results),
+                _readonly_(vars),
+                _readonly_(func_defs),
+                editor_objs,
+                BitFlag256::empty(),
+            );
+        }
+
+        if prev_row != cursor_pos.row || modif.is_some() {
+            self.editor_objs_referencing_current_line_might_changed(
+                tokens,
+                vars,
+                editor_objs,
+                render_buckets,
+            );
+        }
+
+        return modif;
+    }
+
+    pub fn editor_objs_referencing_current_line_might_changed<'b>(
+        &mut self,
+        tokens: &AppTokens<'b>,
+        vars: &Variables,
+        editor_objs: &EditorObjects,
+        render_buckets: &mut RenderBuckets<'b>,
+    ) {
+        let mut editor_objs_referencing_current_line: Vec<EditorObjId> = Vec::with_capacity(8);
+        render_buckets.clear_pulses = true;
+        NoteCalcApp::fill_editor_objs_referencing_current_line(
+            content_y(self.editor.get_selection().get_cursor_pos().row),
+            tokens,
+            vars,
+            &mut editor_objs_referencing_current_line,
+            &self.editor_content,
+        );
+        pulse_editor_objs_referencing_current_line(
+            render_buckets,
+            &self.render_data,
+            &editor_objs_referencing_current_line,
+            editor_objs,
+            &THEMES[self.render_data.theme_index],
+        );
+    }
+
+    pub fn process_and_render_tokens<'b>(
+        &mut self,
+        input_effect: RowModificationType,
+        units: &Units,
+        allocator: &'b Bump,
+        tokens: &mut AppTokens<'b>,
+        results: &mut Results,
+        vars: &mut Variables,
+        func_defs: &mut FunctionDefinitions<'b>,
+        editor_objs: &mut EditorObjects,
+        render_buckets: &mut RenderBuckets<'b>,
+        prev_line_count: usize,
+    ) {
+        let _span = tracy_span("process_and_render_tokens", file!(), line!());
+        fn eval_line<'a>(
+            editor_content: &EditorContent<LineData>,
+            line: &[char],
+            units: &Units,
+            allocator: &'a Bump,
+            apptokens: &mut AppTokens<'a>,
+            results: &mut Results,
+            vars: &mut Variables,
+            func_defs: &FunctionDefinitions<'a>,
+            editor_y: ContentIndex,
+            updated_line_ref_obj_indices: &mut Vec<EditorObjId>,
+            function_def_index: &Option<usize>,
+            argument_dependend_lines: &mut BitFlag256,
+        ) -> (bool, BitFlag256, Option<FunctionDef<'a>>) {
+            let _span = tracy_span("eval_line", file!(), line!());
+
+            debug_print(&format!("eval> {:?}", line));
+
+            let func_param_count = if let Some(i) = function_def_index {
+                func_defs[*i].as_ref().unwrap().param_count
+            } else {
+                0
+            };
+
+            let mut parsed_tokens = Vec::with_capacity(128);
+            TokenParser::parse_line(
+                line,
+                &vars,
+                &mut parsed_tokens,
+                &units,
+                editor_y.as_usize(),
+                allocator,
+                func_param_count,
+                func_defs,
+            );
+
+            if let Some(mut fd) = try_extract_function_def(&mut parsed_tokens, allocator) {
+                fd.first_row_index = editor_y;
+                fd.last_row_index = editor_y;
+                apptokens[editor_y] = Some(Tokens {
+                    tokens: parsed_tokens,
+                    shunting_output_stack: Vec::with_capacity(0),
+                });
+                for i in fd.param_count..MAX_FUNCTION_PARAM_COUNT {
+                    vars[FIRST_FUNC_PARAM_VAR_INDEX + i] = None;
+                }
+                results[editor_y] = Ok(None);
+                return (
+                    true,
+                    BitFlag256::all_rows_starting_at(editor_y.as_usize()),
+                    Some(fd),
+                );
+            }
+
+            let mut shunting_output_stack = Vec::with_capacity(128);
+            ShuntingYard::shunting_yard(
+                &mut parsed_tokens,
+                &mut shunting_output_stack,
+                units,
+                &func_defs[0..editor_y.as_usize()],
+            );
+
+            let prev_var_name = vars[editor_y.as_usize()].as_ref().map(|it| it.name.clone());
+            apptokens[editor_y] = Some(Tokens {
+                tokens: parsed_tokens,
+                shunting_output_stack,
+            });
+
+            let new_result = if apptokens[editor_y].is_some() {
+                let result_depends_on_argument =
+                    if let Some(function_def_index) = function_def_index {
+                        fn determine_argument_dependend_lines<'a>(
+                            fd: &FunctionDef<'a>,
+                            y: usize,
+                            all_lines_tokens: &AppTokens<'a>,
+                            argument_dependend_lines: &mut BitFlag256,
+                        ) -> bool {
+                            if let Some(tokens) = &all_lines_tokens[content_y(y)] {
+                                for t in &tokens.shunting_output_stack {
+                                    match t.typ {
+                                        TokenType::Variable { var_index } => {
+                                            // the result of this line depends on the argument of the function, don't calc it now
+                                            if var_index >= SUM_VARIABLE_INDEX
+                                                || argument_dependend_lines.is_true(var_index)
+                                            {
+                                                argument_dependend_lines.set(y);
+                                                return true;
+                                            } else {
+                                                // check if the variable is inside the function,
+                                                // and if its line depends on the parameter (even indirectly)
+                                                if var_index <= fd.last_row_index.as_usize()
+                                                    && var_index > fd.first_row_index.as_usize()
+                                                {
+                                                    if determine_argument_dependend_lines(
+                                                        fd,
+                                                        var_index,
+                                                        &all_lines_tokens,
+                                                        argument_dependend_lines,
+                                                    ) {
+                                                        argument_dependend_lines.set(y);
+                                                        return true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            return false;
+                        }
+                        let fd = func_defs[*function_def_index].as_ref().unwrap();
+                        determine_argument_dependend_lines(
+                            fd,
+                            editor_y.as_usize(),
+                            &apptokens,
+                            argument_dependend_lines,
+                        )
+                    } else {
+                        false
+                    };
+                if result_depends_on_argument {
+                    let var_name =
+                        get_var_name_from_assignment(editor_y.as_usize(), editor_content);
+                    if !var_name.is_empty() {
+                        debug_print(&format!(
+                            "eval> register variable {:?} at {}",
+                            var_name,
+                            editor_y.as_usize()
+                        ));
+                        // just a Dummy value to register the variable name so following line
+                        // in the function body can refer to it
+                        vars[editor_y.as_usize()] = Some(Variable {
+                            name: Box::from(var_name),
+                            value: Err(()),
+                        });
+                    }
+                    Ok(None)
+                } else {
+                    let (wrong_type_token_indices, result) = evaluate_tokens(
+                        editor_y.as_usize(),
+                        apptokens,
+                        &vars,
+                        &func_defs,
+                        units,
+                        editor_content,
+                        0,
+                        None,
+                    );
+                    for (i, token) in apptokens[editor_y]
+                        .as_mut()
+                        .unwrap()
+                        .tokens
+                        .iter_mut()
+                        .enumerate()
+                    {
+                        if wrong_type_token_indices.is_true(i) {
+                            debug_print(&format!(" calc> {:?} --> String", token));
+                            token.typ = TokenType::StringLiteral;
+                        }
+                    }
+                    if let Err(err) = result.as_ref() {
+                        Token::set_token_error_flag_by_index(
+                            err.token_index,
+                            &mut apptokens[editor_y].as_mut().unwrap().tokens,
+                        );
+                        for i in &[
+                            err.token_index_lhs_1,
+                            err.token_index_lhs_2,
+                            err.token_index_rhs_1,
+                            err.token_index_rhs_2,
+                        ] {
+                            if let Some(i) = i {
+                                Token::set_token_error_flag_by_index(
+                                    *i,
+                                    &mut apptokens[editor_y].as_mut().unwrap().tokens,
+                                );
+                            }
+                        }
+                    }
+
+                    process_variable_assignment_or_line_ref(
+                        &result,
+                        vars,
+                        editor_y.as_usize(),
+                        editor_content,
+                    );
+                    let result = result.map(|it| it.map(|it| it.result));
+                    result
+                }
+            } else {
+                Ok(None)
+            };
+            let vars: &Variables = vars;
+
+            let prev_result = std::mem::replace(&mut results[editor_y], new_result);
+            let result_has_changed = {
+                let new_result = &results[editor_y];
+                function_def_index.is_some()
+                    || match (&prev_result, new_result) {
+                        (Ok(Some(_)), Err(_)) => true,
+                        (Ok(Some(_)), Ok(None)) => true,
+                        (Ok(Some(prev_r)), Ok(Some(new_r))) => prev_r.typ != new_r.typ,
+                        (Err(_), Err(_)) => false,
+                        (Err(_), Ok(None)) => true,
+                        (Err(_), Ok(Some(_))) => true,
+                        (Ok(None), Ok(Some(_))) => true,
+                        (Ok(None), Ok(None)) => false,
+                        (Ok(None), Err(_)) => true,
+                    }
+            };
+
+            let mut rows_to_recalc = BitFlag256::empty();
+            if result_has_changed {
+                let line_ref_name =
+                    NoteCalcApp::get_line_ref_name(&editor_content, editor_y.as_usize());
+                rows_to_recalc.merge(NoteCalcApp::find_line_ref_dependant_lines(
+                    &line_ref_name,
+                    apptokens,
+                    editor_y.as_usize(),
+                    updated_line_ref_obj_indices,
+                ));
+            }
+
+            let curr_var_name = vars[editor_y.as_usize()].as_ref().map(|it| &it.name);
+            rows_to_recalc.merge(find_lines_that_affected_by_var_change(
+                result_has_changed,
+                curr_var_name,
+                prev_var_name,
+                apptokens,
+                editor_y.as_usize(),
+            ));
+
+            rows_to_recalc.merge(find_sum_variable_name(apptokens, editor_y.as_usize()));
+            return (result_has_changed, rows_to_recalc, None);
+        }
+
+        fn find_sum_variable_name(tokens_per_lines: &AppTokens, editor_y: usize) -> BitFlag256 {
+            let mut rows_to_recalc = BitFlag256::empty();
+            'outer: for (line_index, tokens) in
+                tokens_per_lines.iter().skip(editor_y + 1).enumerate()
+            {
+                if let Some(tokens) = tokens {
+                    for token in &tokens.tokens {
+                        match token.typ {
+                            TokenType::Header => {
+                                break 'outer;
+                            }
+                            TokenType::Variable { var_index }
+                                if var_index == SUM_VARIABLE_INDEX =>
+                            {
+                                rows_to_recalc
+                                    .merge(BitFlag256::single_row(editor_y + 1 + line_index));
+                                break 'outer;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            return rows_to_recalc;
+        }
+
+        fn find_lines_that_affected_by_var_change<'b>(
+            needs_dependency_check: bool,
+            curr_var_name: Option<&Box<[char]>>,
+            prev_var_name: Option<Box<[char]>>,
+            tokens_per_lines: &AppTokens<'b>,
+            editor_y: usize,
+        ) -> BitFlag256 {
+            let mut rows_to_recalc = BitFlag256::empty();
+            match (prev_var_name, curr_var_name) {
+                (None, Some(var_name)) => {
+                    // nem volt még, de most van
+                    // recalc all the rows which uses this variable name
+                    for (i, tokens) in tokens_per_lines.iter().skip(editor_y + 1).enumerate() {
+                        if let Some(tokens) = tokens {
+                            for token in &tokens.tokens {
+                                match token.typ {
+                                    TokenType::StringLiteral if *token.ptr == **var_name => {
+                                        rows_to_recalc
+                                            .merge(BitFlag256::single_row(editor_y + 1 + i));
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                (Some(old_var_name), None) => {
+                    // volt, de most nincs
+                    // recalc all the rows which uses the old variable name
+                    for (i, tokens) in tokens_per_lines.iter().skip(editor_y + 1).enumerate() {
+                        if let Some(tokens) = tokens {
+                            for token in &tokens.tokens {
+                                match token.typ {
+                                    TokenType::Variable { .. } if *token.ptr == *old_var_name => {
+                                        rows_to_recalc
+                                            .merge(BitFlag256::single_row(editor_y + 1 + i));
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                (Some(old_var_name), Some(var_name)) if old_var_name != *var_name => {
+                    // volt, de most más a neve
+                    for (i, tokens) in tokens_per_lines.iter().skip(editor_y + 1).enumerate() {
+                        if let Some(tokens) = tokens {
+                            for token in &tokens.tokens {
+                                let recalc = match token.typ {
+                                    TokenType::StringLiteral => var_name.starts_with(token.ptr),
+                                    TokenType::Variable { .. } => *token.ptr == *old_var_name,
+                                    _ => false,
+                                };
+                                if recalc {
+                                    rows_to_recalc.merge(BitFlag256::single_row(editor_y + 1 + i));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                (Some(_old_var_name), Some(var_name)) => {
+                    if !needs_dependency_check {
+                        return BitFlag256::empty();
+                    }
+                    // volt is, van is, a neve is ugyanaz
+                    for (i, tokens) in tokens_per_lines.iter().skip(editor_y + 1).enumerate() {
+                        if let Some(tokens) = tokens {
+                            for token in &tokens.tokens {
+                                let recalc = match token.typ {
+                                    TokenType::Variable { .. } if *token.ptr == **var_name => true,
+                                    _ => false,
+                                };
+                                if recalc {
+                                    rows_to_recalc.merge(BitFlag256::single_row(editor_y + 1 + i));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                (None, None) => {}
+            }
+            return rows_to_recalc;
+        }
+
+        fn find_lines_that_affected_by_fn_change<'b>(
+            needs_dependency_check: bool,
+            curr_var_name: Option<&[char]>,
+            prev_var_name: Option<&[char]>,
+            tokens_per_lines: &AppTokens<'b>,
+            editor_y: usize,
+        ) -> BitFlag256 {
+            let mut rows_to_recalc = BitFlag256::empty();
+            match (prev_var_name, curr_var_name) {
+                (None, Some(var_name)) => {
+                    // nem volt még, de most van
+                    // recalc all the rows which uses this variable name
+                    for (i, tokens) in tokens_per_lines.iter().skip(editor_y + 1).enumerate() {
+                        if let Some(tokens) = tokens {
+                            for token in &tokens.tokens {
+                                match token.typ {
+                                    TokenType::StringLiteral if *token.ptr == *var_name => {
+                                        rows_to_recalc
+                                            .merge(BitFlag256::single_row(editor_y + 1 + i));
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                (Some(old_var_name), None) => {
+                    // volt, de most nincs
+                    // recalc all the rows which uses the old variable name
+                    for (i, tokens) in tokens_per_lines.iter().skip(editor_y + 1).enumerate() {
+                        if let Some(tokens) = tokens {
+                            for token in &tokens.tokens {
+                                match token.typ {
+                                    TokenType::Operator(OperatorTokenType::Fn {
+                                        typ: FnType::UserDefined(_),
+                                        ..
+                                    }) if *token.ptr == *old_var_name => {
+                                        rows_to_recalc
+                                            .merge(BitFlag256::single_row(editor_y + 1 + i));
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                (Some(old_var_name), Some(var_name)) if old_var_name != var_name => {
+                    // volt, de most más a neve
+                    for (i, tokens) in tokens_per_lines.iter().skip(editor_y + 1).enumerate() {
+                        if let Some(tokens) = tokens {
+                            for token in &tokens.tokens {
+                                let recalc = match token.typ {
+                                    TokenType::StringLiteral => var_name.starts_with(token.ptr),
+                                    TokenType::Operator(OperatorTokenType::Fn {
+                                        typ: FnType::UserDefined(_),
+                                        ..
+                                    }) => *token.ptr == *old_var_name,
+                                    _ => false,
+                                };
+                                if recalc {
+                                    rows_to_recalc.merge(BitFlag256::single_row(editor_y + 1 + i));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                (Some(_old_var_name), Some(var_name)) => {
+                    if !needs_dependency_check {
+                        return BitFlag256::empty();
+                    }
+                    // volt is, van is, a neve is ugyanaz
+                    for (i, tokens) in tokens_per_lines.iter().skip(editor_y + 1).enumerate() {
+                        if let Some(tokens) = tokens {
+                            for token in &tokens.tokens {
+                                let recalc = match token.typ {
+                                    TokenType::Operator(OperatorTokenType::Fn {
+                                        typ: FnType::UserDefined(_),
+                                        ..
+                                    }) if *token.ptr == *var_name => true,
+                                    _ => false,
+                                };
+                                if recalc {
+                                    rows_to_recalc.merge(BitFlag256::single_row(editor_y + 1 + i));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                (None, None) => {}
+            }
+            return rows_to_recalc;
+        }
+
+        if matches!(input_effect, RowModificationType::AllLinesFrom(_)) {
+            let curr_line_count = self.editor_content.line_count();
+            for i in curr_line_count..prev_line_count.min(MAX_LINE_COUNT) {
+                func_defs[i] = None;
+            }
+        }
+
+        let mut sum_is_null = true;
+        let mut dependant_rows = BitFlag256::empty();
+        let mut result_change_flag = BitFlag256::empty();
+        // currently has this flag, but it makes the parsing dependent on previous parsing results,
+        // which works now because a change in the function causes the whole function to be parsed again,
+        let mut argument_dependend_lines = BitFlag256::empty();
+        // the index of the FunctionDef whose body is currently processed
+        let mut function_def_index: Option<usize> = None;
+
+        for editor_y in 0..self.editor_content.line_count().min(MAX_LINE_COUNT) {
+            let recalc = match input_effect {
+                RowModificationType::SingleLine(to_change_index) if to_change_index == editor_y => {
+                    true
+                }
+                RowModificationType::AllLinesFrom(to_change_index_from)
+                    if editor_y >= to_change_index_from =>
+                {
+                    true
+                }
+                _ => dependant_rows.need(content_y(editor_y)),
+            };
+            if recalc {
+                if let Some(fd_index) = function_def_index {
+                    let fd = func_defs[fd_index].as_mut().unwrap();
+
+                    let line_is_empty = self.editor_content.line_len(editor_y) == 0;
+                    let can_be_func_body = line_is_empty
+                        || self
+                            .editor_content
+                            .get_char(editor_y, 0)
+                            .is_ascii_whitespace();
+                    if (fd.last_row_index.as_usize() >= editor_y && !can_be_func_body)
+                        || (fd.last_row_index.as_usize() == editor_y && line_is_empty)
+                    {
+                        // this line was part of the function but it is not anymore
+                        fd.last_row_index = content_y(editor_y - 1);
+                        function_def_index = None;
+                        {
+                            let fd = func_defs[fd_index].as_ref().unwrap();
+                            dependant_rows.merge(find_lines_that_affected_by_fn_change(
+                                true,
+                                Some(fd.func_name),
+                                Some(fd.func_name),
+                                _readonly_(tokens),
+                                editor_y,
+                            ));
+                        }
+                    } else if fd.last_row_index.as_usize() < editor_y
+                        && can_be_func_body
+                        && !line_is_empty
+                    {
+                        // was not part of the function but it is now
+                        fd.last_row_index = content_y(editor_y);
+                        // recalc everything since this change could connect the next lines to the
+                        // function header
+                        dependant_rows.merge(BitFlag256::all_rows_starting_at(editor_y + 1));
+                    } else if can_be_func_body {
+                        // was part of the function and still it is
+                    } else {
+                        function_def_index = None;
+                        // it was not part of the function neither now it is
+                    }
+                }
+
+                if self.editor_content.get_data(editor_y).line_id == 0 {
+                    self.editor_content.mut_data(editor_y).line_id = self.line_id_generator;
+                    self.line_id_generator += 1;
+                }
+                let y = content_y(editor_y);
+
+                let (result_has_changed, rows_to_recalc, func_def) = eval_line(
+                    &self.editor_content,
+                    self.editor_content.get_line_valid_chars(editor_y),
+                    units,
+                    allocator,
+                    tokens,
+                    results,
+                    &mut *vars,
+                    func_defs,
+                    y,
+                    &mut self.updated_line_ref_obj_indices,
+                    &function_def_index,
+                    &mut argument_dependend_lines,
+                );
+                if let Some(fd) = func_def {
+                    // a new function has been defined in the current row
+                    func_defs[editor_y] = Some(fd);
+
+                    // close the previous function if any
+                    if let Some(prev_fd_index) = function_def_index {
+                        func_defs[prev_fd_index].as_mut().unwrap().last_row_index =
+                            content_y(editor_y - 1);
+                    }
+                } else {
+                    func_defs[editor_y] = None;
+                }
+                if result_has_changed {
+                    result_change_flag.merge(BitFlag256::single_row(editor_y));
+                    if let Some(fd_i) = function_def_index {
+                        let fd = func_defs[fd_i].as_ref().unwrap();
+                        dependant_rows.merge(find_lines_that_affected_by_fn_change(
+                            true,
+                            Some(fd.func_name),
+                            Some(fd.func_name),
+                            _readonly_(tokens),
+                            editor_y,
+                        ));
+                    }
+                }
+                dependant_rows.merge(rows_to_recalc);
+                let new_h = calc_rendered_height(y, &self.matrix_editing, tokens, results, vars);
+                self.render_data.set_rendered_height(y, new_h);
+            }
+
+            if let Some(fd) = &func_defs[editor_y] {
+                function_def_index = Some(editor_y);
+                // set function parameters as local Variables
+                for i in 0..fd.param_count {
+                    vars[FIRST_FUNC_PARAM_VAR_INDEX + i] = Some(Variable {
+                        name: Box::from(fd.param_names[i]),
+                        value: Err(()),
+                    })
+                }
+            } else if let Some(fdi) = function_def_index {
+                if func_defs[fdi].as_ref().expect("must").last_row_index < content_y(editor_y) {
+                    function_def_index = None;
+                }
+            }
+
+            let function_def_index = function_def_index;
+            if self
+                .editor_content
+                .get_line_valid_chars(editor_y)
+                .starts_with(&['#'])
+            {
+                vars[SUM_VARIABLE_INDEX] = Some(Variable {
+                    name: Box::from(&['s', 'u', 'm'][..]),
+                    value: Err(()),
+                });
+                sum_is_null = true;
+            } else if function_def_index.is_none() {
+                match &results[content_y(editor_y)] {
+                    Ok(Some(result)) => {
+                        sum_result(
+                            vars[SUM_VARIABLE_INDEX]
+                                .as_mut()
+                                .expect("SUM always exists"),
+                            result,
+                            &mut sum_is_null,
+                        );
+                    }
+                    Err(_) | Ok(None) => {}
+                }
+            }
+        }
+
+        if self.editor_content.line_count() > 99 {
+            self.render_data
+                .set_left_gutter_width(LEFT_GUTTER_MIN_WIDTH + 2);
+        } else if self.editor_content.line_count() > 9 {
+            self.render_data
+                .set_left_gutter_width(LEFT_GUTTER_MIN_WIDTH + 1);
+        } else {
+            self.render_data
+                .set_left_gutter_width(LEFT_GUTTER_MIN_WIDTH);
+        }
+
+        self.generate_render_commands_and_fill_editor_objs(
+            units,
+            render_buckets,
+            allocator,
+            _readonly_(tokens),
+            _readonly_(results),
+            _readonly_(vars),
+            _readonly_(func_defs),
+            editor_objs,
+            result_change_flag,
+        );
+        self.set_editor_and_result_panel_widths_and_rerender_if_necessary(
+            units,
+            render_buckets,
+            allocator,
+            _readonly_(tokens),
+            _readonly_(results),
+            _readonly_(vars),
+            _readonly_(func_defs),
+            editor_objs,
+            result_change_flag,
+        );
+    }
+
+    fn set_editor_and_result_panel_widths_wrt_editor_and_rerender_if_necessary<'b>(
+        &mut self,
+        units: &Units,
+        render_buckets: &mut RenderBuckets<'b>,
+        allocator: &'b Bump,
+        tokens: &AppTokens<'b>,
+        results: &Results,
+        vars: &Variables,
+        func_defs: &FunctionDefinitions<'b>,
+        editor_objs: &mut EditorObjects,
+    ) {
+        let minimum_required_space_for_editor =
+            self.render_data.longest_visible_editor_line_len.max(20);
+
+        let desired_gutter_x = self.render_data.left_gutter_width +
+                minimum_required_space_for_editor + 1 /*scrollbar*/;
+        if desired_gutter_x < self.render_data.result_gutter_x {
+            let client_width = self.render_data.client_width;
+            self.result_panel_width_percent =
+                (client_width - desired_gutter_x) * 100 / client_width;
+            self.set_editor_and_result_panel_widths_and_rerender_if_necessary(
+                units,
+                render_buckets,
+                allocator,
+                tokens,
+                results,
+                vars,
+                func_defs,
+                editor_objs,
+                BitFlag256::empty(),
+            );
+        }
+    }
+
+    fn set_editor_and_result_panel_widths_and_rerender_if_necessary<'b>(
+        &mut self,
+        units: &Units,
+        render_buckets: &mut RenderBuckets<'b>,
+        allocator: &'b Bump,
+        tokens: &AppTokens<'b>,
+        results: &Results,
+        vars: &Variables,
+        func_defs: &FunctionDefinitions<'b>,
+        editor_objs: &mut EditorObjects,
+        result_change_flag: BitFlag256,
+    ) {
+        let current_result_g_x = self.render_data.result_gutter_x;
+        set_editor_and_result_panel_widths(
+            self.render_data.client_width,
+            self.result_panel_width_percent,
+            &mut self.render_data,
+        );
+        if self.render_data.result_gutter_x != current_result_g_x {
+            // we know the length of each line and the results only after rendering them,
+            // so we can set the position of the right gutter only after a complete rendering run.
+            // If it turns out that the gutter should/could be moved,
+            // we will repeat the rendering with the new gutter position.
+            self.generate_render_commands_and_fill_editor_objs(
+                units,
+                render_buckets,
+                allocator,
+                tokens,
+                results,
+                vars,
+                func_defs,
+                editor_objs,
+                result_change_flag,
+            );
+        }
+    }
+
+    fn get_line_ref_name(editor_content: &EditorContent<LineData>, y: usize) -> Vec<char> {
+        let line_data = editor_content.get_data(y);
+        let line_ref_name: Vec<char> = format!("&[{}]", line_data.line_id).chars().collect();
+        return line_ref_name;
+    }
+
+    fn fill_editor_objs_referencing_current_line<'b>(
+        current_y: ContentIndex,
+        tokens: &AppTokens<'b>,
+        vars: &Variables,
+        editor_objs_referencing_current_line: &mut Vec<EditorObjId>,
+        editor_content: &EditorContent<LineData>,
+    ) {
+        editor_objs_referencing_current_line.clear();
+        if let Some(var) = &vars[current_y.as_usize()] {
+            NoteCalcApp::find_line_ref_dependant_lines(
+                &var.name,
+                tokens,
+                current_y.as_usize(),
+                editor_objs_referencing_current_line,
+            );
+        } else {
+            let line_ref_name =
+                NoteCalcApp::get_line_ref_name(&editor_content, current_y.as_usize());
+            NoteCalcApp::find_line_ref_dependant_lines(
+                &line_ref_name,
+                tokens,
+                current_y.as_usize(),
+                editor_objs_referencing_current_line,
+            );
+        };
+    }
+
+    fn find_line_ref_dependant_lines<'b>(
+        editor_obj_name: &[char],
+        tokens_per_lines: &AppTokens<'b>,
+        editor_y: usize,
+        updated_line_ref_obj_indices: &mut Vec<EditorObjId>,
+    ) -> BitFlag256 {
+        let mut rows_to_recalc = BitFlag256::empty();
+        for (token_line_index, tokens) in tokens_per_lines.iter().skip(editor_y + 1).enumerate() {
+            if let Some(tokens) = tokens {
+                let mut already_added = BitFlag256::empty();
+                for token in &tokens.tokens {
+                    let var_index = match token.typ {
+                        TokenType::LineReference { var_index }
+                            if already_added.is_false(var_index)
+                                && token.ptr == editor_obj_name =>
+                        {
+                            var_index
+                        }
+                        TokenType::Variable { var_index }
+                            if var_index <= SUM_VARIABLE_INDEX
+                                && already_added.is_false(var_index)
+                                && token.ptr == editor_obj_name =>
+                        {
+                            var_index
+                        }
+
+                        _ => {
+                            continue;
+                        }
+                    };
+                    let index = editor_y + 1 + token_line_index;
+                    updated_line_ref_obj_indices.push(EditorObjId {
+                        content_index: content_y(index),
+                        var_index,
+                    });
+                    rows_to_recalc.merge(BitFlag256::single_row(index));
+                    already_added.set(var_index);
+                }
+            } else {
+                break;
+            }
+        }
+        return rows_to_recalc;
+    }
+
+    // export
+    pub fn copy_selected_rows_with_result_to_clipboard<'b>(
+        &'b mut self,
+        units: &'b Units,
+        render_buckets: &'b mut RenderBuckets<'b>,
+        tokens: &AppTokens<'b>,
+        vars: &Variables,
+        results: &Results,
+    ) -> String {
+        render_buckets.clear();
+        let theme = &THEMES[self.render_data.theme_index];
+        let (first_row, second_row) =
+            if let Some((start, end)) = self.editor.get_selection().is_range_ordered() {
+                (start.row, end.row)
+            } else {
+                (0, self.editor_content.line_count() - 1)
+            };
+        let row_nums = second_row - first_row + 1;
+
+        let mut gr = GlobalRenderData::new(1024, 1000 /*dummy value*/, 1024 / 2, 0, 2);
+        // evaluate all the lines so variables are defined even if they are not selected
+        let mut render_height = 0;
+        {
+            let mut r = PerLineRenderData::new();
+            for i in first_row..=second_row {
+                let i = content_y(i);
+                // tokens must be evaluated to register variables for line reference inlining in the output text
+
+                if let Some(tokens) = &tokens[i] {
+                    r.new_line_started();
+                    gr.set_render_y(r.editor_y, Some(r.render_y));
+
+                    r.rendered_row_height = PerLineRenderData::calc_rendered_row_height(
+                        &results[i],
+                        &tokens.tokens,
+                        &vars[..],
+                        None,
+                    );
+                    // "- 1" so if it is even, it always appear higher
+                    r.vert_align_offset = (r.rendered_row_height - 1) / 2;
+                    gr.set_rendered_height(r.editor_y, r.rendered_row_height);
+                    render_height += r.rendered_row_height;
+                    // Todo: refactor the parameters into a struct
+                    render_tokens(
+                        &tokens.tokens,
+                        &mut r,
+                        &mut gr,
+                        render_buckets,
+                        // TODO &mut code smell
+                        &mut Vec::new(),
+                        &self.editor,
+                        &self.matrix_editing,
+                        &vars[..],
+                        &units,
+                        true, // force matrix rendering
+                        None,
+                        theme,
+                    );
+                    r.line_render_ended(r.rendered_row_height);
+                }
+            }
+        }
+
+        let mut tmp_canvas: Vec<[char; 256]> = Vec::with_capacity(render_height);
+        for _ in 0..render_height {
+            tmp_canvas.push([' '; 256]);
+        }
+        // render all tokens to the tmp canvas, so we can measure the longest row
+        render_buckets_into(&render_buckets, &mut tmp_canvas);
+        let mut max_len = 0;
+        for canvas_line in &tmp_canvas {
+            let mut len = 256;
+            for ch in canvas_line.iter().rev() {
+                if *ch != ' ' {
+                    break;
+                }
+                len -= 1;
+            }
+            if len > max_len {
+                max_len = len;
+            }
+        }
+
+        render_buckets.clear();
+
+        let mut tmp = ResultRender::new(ArrayVec::new());
+
+        gr.result_gutter_x = max_len + 2;
+        render_results_into_buf_and_calc_len(
+            &units,
+            &results.as_slice()[first_row..=second_row],
+            &mut tmp,
+            &self.editor_content,
+            &gr,
+            None,
+        );
+        gr.longest_visible_result_len = tmp.max_len;
+
+        create_render_commands_for_results_and_render_matrices(
+            &tmp,
+            units,
+            &results.as_slice()[first_row..=second_row],
+            render_buckets,
+            &gr,
+            None,
+            theme,
+        );
+
+        for i in 0..render_height {
+            render_buckets.draw_char(
+                Layer::AboveText,
+                gr.result_gutter_x,
+                canvas_y(i as isize),
+                '█',
+            );
+        }
+        render_buckets_into(&render_buckets, &mut tmp_canvas);
+        let mut result_str = String::with_capacity(row_nums * 64);
+        for canvas_line in &tmp_canvas {
+            result_str.extend(canvas_line.iter());
+            while result_str.chars().last().unwrap_or('x') == ' ' {
+                result_str.pop();
+            }
+            result_str.push('\n');
+        }
+
+        return result_str;
+    }
+
+    fn is_matrix_editing_or_need_to_create_one<'b>(
+        &mut self,
+        input: EditorInputEvent,
+        editor_objs: &EditorObjects,
+        refactor_me: &mut bool,
+    ) -> bool {
+        // either there is an active matrix editing, or the cursor is inside a matrix and
+        // we have to create the active matrix editing then
+        let prev_selection = self.editor.get_selection();
+        let prev_cursor_pos = prev_selection.get_cursor_pos();
+        if let Some(matrix_edit) = &self.matrix_editing {
+            if matrix_edit.row_count == 1
+                && !matrix_edit.editor.get_selection().is_range()
+                && matrix_edit.editor.is_cursor_at_beginning()
+                && matrix_edit.current_cell.column == 0
+                && input == EditorInputEvent::Backspace
+            {
+                let row = matrix_edit.row_index.as_usize();
+                let col = matrix_edit.start_text_index;
+                end_matrix_editing(
+                    &mut self.matrix_editing,
+                    &mut self.editor,
+                    &mut self.editor_content,
+                    Some(Pos::from_row_column(row, col + 1)),
+                );
+                // let the outer code remove the '['
+                *refactor_me = true;
+                return false;
+            } else if matrix_edit.row_count == 1
+                && !matrix_edit.editor.get_selection().is_range()
+                && matrix_edit
+                    .editor
+                    .is_cursor_at_eol(&matrix_edit.editor_content)
+                && input == EditorInputEvent::Del
+            {
+                end_matrix_editing(
+                    &mut self.matrix_editing,
+                    &mut self.editor,
+                    &mut self.editor_content,
+                    None,
+                );
+                self.editor.set_selection_save_col(Selection::single(
+                    self.editor.get_selection().get_cursor_pos().with_prev_col(),
+                ));
+                // let the outer code remove the ']'
+                *refactor_me = true;
+                return false;
+            }
+            return true;
+        } else if let Some(editor_obj) = self.get_obj_at_inside(
+            prev_cursor_pos.column,
+            content_y(prev_cursor_pos.row),
+            editor_objs,
+        ) {
+            match editor_obj.typ {
+                EditorObjectType::Matrix {
+                    col_count,
+                    row_count,
+                } => {
+                    self.matrix_editing = Some(MatrixEditing::new(
+                        row_count,
+                        col_count,
+                        &self
+                            .editor_content
+                            .get_line_valid_chars(editor_obj.row.as_usize())
+                            [editor_obj.start_x..editor_obj.end_x],
+                        editor_obj.row,
+                        editor_obj.start_x,
+                        editor_obj.end_x,
+                        Pos::from_row_column(0, 0),
+                    ));
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        return false;
+    }
+
+    fn handle_parenthesis_completion<'b>(&mut self, input: &EditorInputEvent) -> bool {
+        let closing_char = match input {
+            EditorInputEvent::Char('(') => Some(')'),
+            EditorInputEvent::Char('[') => Some(']'),
+            EditorInputEvent::Char('{') => Some('}'),
+            EditorInputEvent::Char('\"') => Some('\"'),
+            _ => None,
+        };
+        if let Some(closing_char) = closing_char {
+            if self
+                .editor
+                .handle_input_undoable(*input, InputModifiers::none(), &mut self.editor_content)
+                .is_some()
+            {
+                let cursor = self.editor.get_selection().get_cursor_pos();
+                let next_char = self.editor_content.get_char(cursor.row, cursor.column);
+                let closing_paren_allowed = next_char.is_whitespace()
+                    || next_char == ')'
+                    || next_char == ']'
+                    || next_char == '}'
+                    || self.editor.is_cursor_at_eol(&self.editor_content);
+                if !closing_paren_allowed {
+                    return true;
+                }
+
+                if self
+                    .editor
+                    .handle_input_undoable(
+                        EditorInputEvent::Char(closing_char),
+                        InputModifiers::none(),
+                        &mut self.editor_content,
+                    )
+                    .is_some()
+                {
+                    self.editor.handle_input_undoable(
+                        EditorInputEvent::Left,
+                        InputModifiers::none(),
+                        &mut self.editor_content,
+                    );
+                    if closing_char == ']' {
+                        self.matrix_editing = Some(MatrixEditing::new(
+                            1,
+                            1,
+                            &[],
+                            content_y(cursor.row),
+                            cursor.column - 1,
+                            cursor.column + 1,
+                            Pos::from_row_column(0, 0),
+                        ));
+                    }
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn handle_parenthesis_removal<'b>(&mut self, input: &EditorInputEvent) -> bool {
+        let prev_selection = self.editor.get_selection();
+        if prev_selection.is_range() {
+            return false;
+        }
+
+        let prev_cursor_pos = prev_selection.get_cursor_pos();
+        let char_in_front_of_cursur = if prev_cursor_pos.column > 0 {
+            Some(
+                self.editor_content
+                    .get_char(prev_cursor_pos.row, prev_cursor_pos.column - 1),
+            )
+        } else {
+            None
+        };
+
+        if *input == EditorInputEvent::Backspace {
+            let closing_char = match char_in_front_of_cursur {
+                Some('(') => Some(')'),
+                Some('[') => Some(']'),
+                Some('{') => Some('}'),
+                Some('\"') => Some('\"'),
+                _ => None,
+            };
+
+            if let Some(closing_char) = closing_char {
+                let cursor_pos = self.editor.get_selection().get_cursor_pos();
+                if !self.editor.is_cursor_at_eol(&self.editor_content)
+                    && self
+                        .editor_content
+                        .get_char(cursor_pos.row, cursor_pos.column)
+                        == closing_char
+                {
+                    if self
+                        .editor
+                        .handle_input_undoable(
+                            EditorInputEvent::Backspace,
+                            InputModifiers::none(),
+                            &mut self.editor_content,
+                        )
+                        .is_some()
+                    {
+                        self.editor.handle_input_undoable(
+                            EditorInputEvent::Del,
+                            InputModifiers::none(),
+                            &mut self.editor_content,
+                        );
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    fn handle_parenthesis_wrapping<'b>(&mut self, input: &EditorInputEvent) -> bool {
+        let prev_selection = self.editor.get_selection();
+        if let Some((start, end)) = prev_selection.is_range_ordered() {
+            let single_line = start.row == end.row;
+            let closing_char = match input {
+                EditorInputEvent::Char('(') => Some(')'),
+                EditorInputEvent::Char('[') => Some(']'),
+                EditorInputEvent::Char('{') => Some('}'),
+                EditorInputEvent::Char('\"') => Some('\"'),
+                _ => None,
+            };
+            if let Some(closing_char) = closing_char {
+                // end selection and insert closing char
+                self.editor.set_cursor_pos(end);
+                if self
+                    .editor
+                    .handle_input_undoable(
+                        EditorInputEvent::Char(closing_char),
+                        InputModifiers::none(),
+                        &mut self.editor_content,
+                    )
+                    .is_some()
+                {
+                    // insert opening char
+                    self.editor.set_cursor_pos(start);
+                    if self
+                        .editor
+                        .handle_input_undoable(
+                            *input,
+                            InputModifiers::none(),
+                            &mut self.editor_content,
+                        )
+                        .is_some()
+                    {
+                        // restore selection
+                        let (real_start, real_end) = prev_selection.get_range();
+                        if start != real_start {
+                            // the selection is backwards
+                            self.editor.set_selection_save_col(Selection::range(
+                                if single_line {
+                                    real_start.with_next_col()
+                                } else {
+                                    real_start
+                                },
+                                real_end.with_next_col(),
+                            ));
+                        } else {
+                            self.editor.set_selection_save_col(Selection::range(
+                                start.with_next_col(),
+                                if single_line {
+                                    end.with_next_col()
+                                } else {
+                                    end
+                                },
+                            ));
+                        }
+                    }
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    fn handle_completion<'b>(
+        &mut self,
+        input: &EditorInputEvent,
+        editor_objects: &mut EditorObjects,
+        vars: &Variables,
+    ) -> bool {
+        let cursor_pos = self.editor.get_selection();
+        if *input != EditorInputEvent::Tab || cursor_pos.get_cursor_pos().column == 0 {
+            return false;
+        }
+
+        let cursor_pos = cursor_pos.get_cursor_pos();
+
+        for autocompl_const in &AUTOCOMPLETION_CONSTS {
+            let len = autocompl_const.abbrev.len();
+            if cursor_pos.column <= len {
+                continue;
+            }
+            let start_x = cursor_pos.column - (len + 1);
+            let autocompletion_match = {
+                let line = self.editor_content.get_line_valid_chars(cursor_pos.row);
+                line[start_x] == '.'
+                    && &line[start_x + 1..cursor_pos.column] == autocompl_const.abbrev
+            };
+            if autocompletion_match {
+                let start = cursor_pos.with_column(start_x);
+                self.editor
+                    .set_selection_save_col(Selection::range(start, cursor_pos));
+                self.editor.handle_input_undoable(
+                    EditorInputEvent::Backspace,
+                    InputModifiers::none(),
+                    &mut self.editor_content,
+                );
+                for ch in autocompl_const.replace_to {
+                    self.editor.handle_input_undoable(
+                        EditorInputEvent::Char(*ch),
+                        InputModifiers::none(),
+                        &mut self.editor_content,
+                    );
+                }
+                if let Some(relative_new_cursor_pos) = autocompl_const.relative_new_cursor_pos {
+                    self.editor.set_selection_save_col(Selection::single(
+                        start.add_column(relative_new_cursor_pos),
+                    ));
+                }
+                if autocompl_const.abbrev.len() >= 3
+                    && &autocompl_const.abbrev[0..3] == &['m', 'a', 't']
+                {
+                    // remove the SimpleToken of the .mat string
+                    let size = if autocompl_const.abbrev.len() == 3 {
+                        1 // .mat
+                    } else if autocompl_const.abbrev[3] == '3' {
+                        3
+                    } else {
+                        4
+                    };
+                    editor_objects[content_y(cursor_pos.row)].pop();
+                    editor_objects[content_y(cursor_pos.row)].push(EditorObject {
+                        typ: EditorObjectType::Matrix {
+                            row_count: size,
+                            col_count: size,
+                        },
+                        row: content_y(cursor_pos.row),
+                        start_x,
+                        end_x: start_x + autocompl_const.replace_to.len(),
+                        rendered_x: 0,           // dummy
+                        rendered_y: canvas_y(0), // dummy
+                        rendered_w: size + 2,
+                        rendered_h: 1,
+                    });
+                    self.check_stepping_into_matrix(
+                        Pos::from_row_column(0, 0),
+                        _readonly_(editor_objects),
+                    );
+                }
+                return true;
+            }
+        }
+
+        let line = self.editor_content.get_line_valid_chars(cursor_pos.row);
+        // check for autocompletion
+        // find space
+        let (begin_index, expected_len) = {
+            let mut begin_index = cursor_pos.column - 1;
+            let mut len = 1;
+            while begin_index > 0
+                && (line[begin_index - 1].is_alphanumeric() || line[begin_index - 1] == '_')
+            {
+                begin_index -= 1;
+                len += 1;
+            }
+            (begin_index, len)
+        };
+        // find the best match
+        let mut matched_var_index = None;
+        for (var_i, var) in vars[0..cursor_pos.row].iter().enumerate() {
+            if var.is_none() {
+                continue;
+            }
+            let mut match_len = 0;
+            for (var_ch, actual_ch) in var
+                .as_ref()
+                .unwrap()
+                .name
+                .iter()
+                .zip(&line[begin_index..begin_index + expected_len])
+            {
+                if *var_ch != *actual_ch {
+                    break;
+                }
+                match_len += 1;
+            }
+            if expected_len == match_len {
+                if matched_var_index.is_some() {
+                    // multiple match, don't autocomplete
+                    matched_var_index = None;
+                    break;
+                } else {
+                    matched_var_index = Some(var_i);
+                }
+            }
+        }
+
+        if let Some(matched_var_index) = matched_var_index {
+            for ch in vars[matched_var_index]
+                .as_ref()
+                .unwrap()
+                .name
+                .iter()
+                .skip(expected_len)
+            {
+                self.editor.handle_input_undoable(
+                    EditorInputEvent::Char(*ch),
+                    InputModifiers::none(),
+                    &mut self.editor_content,
+                );
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    fn handle_obj_deletion<'b>(
+        &mut self,
+        input: &EditorInputEvent,
+        editor_objects: &mut EditorObjects,
+        modifiers: InputModifiers,
+    ) -> Option<RowModificationType> {
+        let selection = self.editor.get_selection();
+        let cursor_pos = selection.get_cursor_pos();
+        if *input == EditorInputEvent::Backspace
+            && !selection.is_range()
+            && selection.start.column > 0
+        {
+            if let Some(index) = if modifiers.ctrl {
+                self.index_of_matrix_or_lineref_at(
+                    cursor_pos.with_prev_col(),
+                    _readonly_(editor_objects),
+                )
+            } else {
+                self.index_of_lineref_at(cursor_pos.with_prev_col(), _readonly_(editor_objects))
+            } {
+                // remove it
+                let obj = editor_objects[content_y(cursor_pos.row)].remove(index);
+                let sel = Selection::range(
+                    Pos::from_row_column(obj.row.as_usize(), obj.start_x),
+                    Pos::from_row_column(obj.row.as_usize(), obj.end_x),
+                );
+                self.editor.set_selection_save_col(sel);
+                self.editor.handle_input_undoable(
+                    EditorInputEvent::Backspace,
+                    InputModifiers::none(),
+                    &mut self.editor_content,
+                );
+                return if obj.rendered_h > 1 {
+                    Some(RowModificationType::AllLinesFrom(cursor_pos.row))
+                } else {
+                    Some(RowModificationType::SingleLine(cursor_pos.row))
+                };
+            }
+        } else if *input == EditorInputEvent::Del && !selection.is_range() {
+            if let Some(index) = if modifiers.ctrl {
+                self.index_of_matrix_or_lineref_at(cursor_pos, _readonly_(editor_objects))
+            } else {
+                self.index_of_lineref_at(cursor_pos, _readonly_(editor_objects))
+            } {
+                // remove it
+                let obj = editor_objects[content_y(cursor_pos.row)].remove(index);
+                let sel = Selection::range(
+                    Pos::from_row_column(obj.row.as_usize(), obj.start_x),
+                    Pos::from_row_column(obj.row.as_usize(), obj.end_x),
+                );
+                self.editor.set_selection_save_col(sel);
+                self.editor.handle_input_undoable(
+                    EditorInputEvent::Del,
+                    InputModifiers::none(),
+                    &mut self.editor_content,
+                );
+                return if obj.rendered_h > 1 {
+                    Some(RowModificationType::AllLinesFrom(cursor_pos.row))
+                } else {
+                    Some(RowModificationType::SingleLine(cursor_pos.row))
+                };
+            }
+        }
+        return None;
+    }
+
+    fn handle_obj_jump_over<'b>(
+        &mut self,
+        input: &EditorInputEvent,
+        modifiers: InputModifiers,
+        editor_objects: &EditorObjects,
+    ) -> bool {
+        let selection = self.editor.get_selection();
+        let cursor_pos = selection.get_cursor_pos();
+        if *input == EditorInputEvent::Left
+            && !selection.is_range()
+            && selection.start.column > 0
+            && modifiers.shift == false
+        {
+            let obj = self
+                .find_editor_object_at_including_end_of_word(cursor_pos, editor_objects)
+                .map(|it| (it.typ, it.row, it.start_x));
+            if let Some((EditorObjectType::LineReference { .. }, row, start_x)) = obj {
+                //  jump over it
+                self.editor.set_cursor_pos_r_c(row.as_usize(), start_x);
+                return true;
+            }
+        } else if *input == EditorInputEvent::Right
+            && !selection.is_range()
+            && modifiers.shift == false
+        {
+            let obj = self
+                .find_editor_object_at_excluding_end_of_word(cursor_pos, editor_objects)
+                .map(|it| (it.typ, it.row, it.end_x));
+
+            if let Some((EditorObjectType::LineReference { .. }, row, end_x)) = obj {
+                //  jump over it
+                self.editor.set_cursor_pos_r_c(row.as_usize(), end_x);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn handle_jump_to_definition<'b>(
+        &mut self,
+        input: &EditorInputEvent,
+        modifiers: InputModifiers,
+        editor_objects: &EditorObjects,
+    ) -> bool {
+        let selection = self.editor.get_selection();
+        let cursor_pos = selection.get_cursor_pos();
+        if *input == EditorInputEvent::Char('b') && modifiers.ctrl {
+            if let Some(var_index) =
+                self.find_var_index_of_var_or_lineref_at(cursor_pos, editor_objects)
+            {
+                self.editor.set_cursor_pos_r_c(var_index, 0);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn check_stepping_into_matrix<'b>(
+        &mut self,
+        enter_from_pos: Pos,
+        editor_objects: &EditorObjects,
+    ) {
+        if let Some(editor_obj) =
+            is_pos_inside_an_obj(editor_objects, self.editor.get_selection().get_cursor_pos())
+        {
+            match editor_obj.typ {
+                EditorObjectType::Matrix {
+                    row_count,
+                    col_count,
+                } => {
+                    if self.matrix_editing.is_none() && !self.editor.get_selection().is_range() {
+                        self.matrix_editing = Some(MatrixEditing::new(
+                            row_count,
+                            col_count,
+                            &self
+                                .editor_content
+                                .get_line_valid_chars(editor_obj.row.as_usize())
+                                [editor_obj.start_x..editor_obj.end_x],
+                            editor_obj.row,
+                            editor_obj.start_x,
+                            editor_obj.end_x,
+                            enter_from_pos,
+                        ));
+                    }
+                }
+                EditorObjectType::SimpleTokens
+                | EditorObjectType::LineReference { .. }
+                | EditorObjectType::Variable { .. } => {}
+            }
+        }
+    }
+
+    fn find_editor_object_at_including_end_of_word<'b>(
+        &self,
+        pos: Pos,
+        editor_objects: &'b EditorObjects,
+    ) -> Option<&'b EditorObject> {
+        for obj in &editor_objects[content_y(pos.row)] {
+            if (obj.start_x..=obj.end_x).contains(&pos.column) {
+                return Some(obj);
+            }
+        }
+        return None;
+    }
+
+    // "asd |var"
+    // here the cursor is on the border of the first and second token,
+    // but the simpletoken goes first, so the variable will not be found,
+    // which is why we need this specific find method for linear refs and vars
+    fn find_var_index_of_var_or_lineref_at(
+        &self,
+        pos: Pos,
+        editor_objects: &EditorObjects,
+    ) -> Option<usize> {
+        for obj in &editor_objects[content_y(pos.row)] {
+            match obj.typ {
+                EditorObjectType::Variable { var_index }
+                | EditorObjectType::LineReference { var_index }
+                    if (obj.start_x..=obj.end_x).contains(&pos.column) =>
+                {
+                    return Some(var_index);
+                }
+                _ => {}
+            }
+        }
+        return None;
+    }
+
+    fn find_editor_object_at_excluding_end_of_word<'b>(
+        &self,
+        pos: Pos,
+        editor_objects: &'b EditorObjects,
+    ) -> Option<&'b EditorObject> {
+        for obj in &editor_objects[content_y(pos.row)] {
+            if (obj.start_x..obj.end_x).contains(&pos.column) {
+                return Some(obj);
+            }
+        }
+        return None;
+    }
+
+    #[allow(dead_code)]
+    fn index_of_matrix_or_lineref_at<'b>(
+        &self,
+        pos: Pos,
+        editor_objects: &EditorObjects,
+    ) -> Option<usize> {
+        return editor_objects[content_y(pos.row)].iter().position(|obj| {
+            matches!(
+                obj.typ,
+                EditorObjectType::LineReference { .. } | EditorObjectType::Matrix { .. }
+            ) && (obj.start_x..obj.end_x).contains(&pos.column)
+        });
+    }
+
+    fn index_of_lineref_at<'b>(&self, pos: Pos, editor_objects: &EditorObjects) -> Option<usize> {
+        return editor_objects[content_y(pos.row)].iter().position(|obj| {
+            matches!(obj.typ, EditorObjectType::LineReference { .. })
+                && (obj.start_x..obj.end_x).contains(&pos.column)
+        });
+    }
+
+    fn handle_matrix_editor_input(&mut self, input: EditorInputEvent, modifiers: InputModifiers) {
+        let mat_edit = self.matrix_editing.as_mut().unwrap();
+        let cur_pos = self.editor.get_selection().get_cursor_pos();
+
+        let simple = !modifiers.shift && !modifiers.alt;
+        let alt = modifiers.alt;
+        if input == EditorInputEvent::Esc || input == EditorInputEvent::Enter {
+            end_matrix_editing(
+                &mut self.matrix_editing,
+                &mut self.editor,
+                &mut self.editor_content,
+                None,
+            );
+        } else if input == EditorInputEvent::Tab {
+            if mat_edit.current_cell.column + 1 < mat_edit.col_count {
+                mat_edit.move_to_cell(mat_edit.current_cell.with_next_col());
+            } else if mat_edit.current_cell.row + 1 < mat_edit.row_count {
+                mat_edit.move_to_cell(mat_edit.current_cell.with_next_row().with_column(0));
+            } else {
+                end_matrix_editing(
+                    &mut self.matrix_editing,
+                    &mut self.editor,
+                    &mut self.editor_content,
+                    None,
+                );
+            }
+        } else if alt && input == EditorInputEvent::Right {
+            mat_edit.add_column();
+        } else if alt && input == EditorInputEvent::Left && mat_edit.col_count > 1 {
+            mat_edit.remove_column();
+        } else if alt && input == EditorInputEvent::Down {
+            mat_edit.add_row();
+        } else if alt && input == EditorInputEvent::Up && mat_edit.row_count > 1 {
+            mat_edit.remove_row();
+        } else if simple
+            && input == EditorInputEvent::Left
+            && mat_edit.editor.is_cursor_at_beginning()
+        {
+            if mat_edit.current_cell.column > 0 {
+                mat_edit.move_to_cell(mat_edit.current_cell.with_prev_col());
+            } else {
+                let start_text_index = mat_edit.start_text_index;
+                end_matrix_editing(
+                    &mut self.matrix_editing,
+                    &mut self.editor,
+                    &mut self.editor_content,
+                    Some(cur_pos.with_column(start_text_index)),
+                );
+            }
+        } else if simple
+            && input == EditorInputEvent::Right
+            && mat_edit.editor.is_cursor_at_eol(&mat_edit.editor_content)
+        {
+            if let Some((_from, to)) = mat_edit.editor.get_selection().is_range_ordered() {
+                mat_edit.editor.set_cursor_pos_r_c(0, to.column);
+            } else if mat_edit.current_cell.column + 1 < mat_edit.col_count {
+                mat_edit.move_to_cell(mat_edit.current_cell.with_next_col());
+            } else {
+                end_matrix_editing(
+                    &mut self.matrix_editing,
+                    &mut self.editor,
+                    &mut self.editor_content,
+                    None,
+                );
+            }
+        } else if simple && input == EditorInputEvent::Up {
+            if mat_edit.current_cell.row > 0 {
+                mat_edit.move_to_cell(mat_edit.current_cell.with_prev_row());
+            } else {
+                end_matrix_editing(
+                    &mut self.matrix_editing,
+                    &mut self.editor,
+                    &mut self.editor_content,
+                    None,
+                );
+                self.editor
+                    .handle_input_undoable(input, modifiers, &mut self.editor_content);
+            }
+        } else if simple && input == EditorInputEvent::Down {
+            if mat_edit.current_cell.row + 1 < mat_edit.row_count {
+                mat_edit.move_to_cell(mat_edit.current_cell.with_next_row());
+            } else {
+                end_matrix_editing(
+                    &mut self.matrix_editing,
+                    &mut self.editor,
+                    &mut self.editor_content,
+                    None,
+                );
+                self.editor
+                    .handle_input_undoable(input, modifiers, &mut self.editor_content);
+            }
+        } else if simple && input == EditorInputEvent::End {
+            if mat_edit.current_cell.column != mat_edit.col_count - 1 {
+                mat_edit.move_to_cell(mat_edit.current_cell.with_column(mat_edit.col_count - 1));
+            } else {
+                end_matrix_editing(
+                    &mut self.matrix_editing,
+                    &mut self.editor,
+                    &mut self.editor_content,
+                    None,
+                );
+                self.editor
+                    .handle_input_undoable(input, modifiers, &mut self.editor_content);
+            }
+        } else if simple && input == EditorInputEvent::Home {
+            if mat_edit.current_cell.column != 0 {
+                mat_edit.move_to_cell(mat_edit.current_cell.with_column(0));
+            } else {
+                let start_index = mat_edit.start_text_index;
+                end_matrix_editing(
+                    &mut self.matrix_editing,
+                    &mut self.editor,
+                    &mut self.editor_content,
+                    Some(cur_pos.with_column(start_index)),
+                );
+                self.editor
+                    .handle_input_undoable(input, modifiers, &mut self.editor_content);
+            }
+        } else {
+            mat_edit
+                .editor
+                .handle_input_undoable(input, modifiers, &mut mat_edit.editor_content);
+        }
+    }
+
+    pub fn generate_render_commands_and_fill_editor_objs<'b>(
+        &mut self,
+        units: &Units,
+        render_buckets: &mut RenderBuckets<'b>,
+        allocator: &'b Bump,
+        tokens: &AppTokens<'b>,
+        results: &Results,
+        vars: &Variables,
+        func_defs: &FunctionDefinitions<'b>,
+        editor_objs: &mut EditorObjects,
+        result_change_flag: BitFlag256,
+    ) {
+        let _span = tracy_span(
+            "generate_render_commands_and_fill_editor_objs",
+            file!(),
+            line!(),
+        );
+        render_buckets.clear();
+        NoteCalcApp::renderr(
+            &mut self.editor,
+            &self.editor_content,
+            units,
+            &mut self.matrix_editing,
+            &mut self.line_reference_chooser,
+            render_buckets,
+            result_change_flag,
+            &mut self.render_data,
+            allocator,
+            tokens,
+            results,
+            vars,
+            func_defs,
+            editor_objs,
+            &self.updated_line_ref_obj_indices,
+            self.mouse_hover_type,
+        );
+        self.updated_line_ref_obj_indices.clear();
+    }
+}
+
 fn get_function_index_for_line(
     line_index: usize,
     func_defs: &FunctionDefinitions,
