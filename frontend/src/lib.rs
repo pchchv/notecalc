@@ -152,6 +152,25 @@ pub fn set_compressed_encoded_content(app_ptr: usize, compressed_encoded: String
 }
 
 #[wasm_bindgen]
+pub fn get_clipboard_text(app_ptr: usize) -> String {
+    let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
+    let app = bcf.app();
+    return app.editor.clipboard.clone();
+}
+
+#[wasm_bindgen]
+pub fn get_selected_text_and_clear_app_clipboard(app_ptr: usize) -> Option<String> {
+    let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
+    return bcf.mut_app().get_selected_text_and_clear_app_clipboard();
+}
+
+#[wasm_bindgen]
+pub fn get_allocated_bytes_count(app_ptr: usize) -> usize {
+    let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
+    return bcf.allocator().allocated_bytes();
+}
+
+#[wasm_bindgen]
 pub fn handle_time(app_ptr: usize, now: u32) -> bool {
     let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
     let rerender_needed = bcf.mut_app().handle_time(
