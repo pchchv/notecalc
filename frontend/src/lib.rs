@@ -96,3 +96,21 @@ pub fn set_theme(app_ptr: usize, theme_index: usize) {
         bcf.mut_render_bucket(),
     );
 }
+
+#[wasm_bindgen]
+pub fn get_compressed_encoded_content(app_ptr: usize) -> String {
+    let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
+    let app = bcf.mut_app();
+    let content = app.get_line_ref_normalized_content();
+    {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::prelude::*;
+        let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
+        e.write_all(content.as_bytes()).expect("");
+        let compressed_encoded = e
+            .finish()
+            .map(|it| base64::encode_config(it, base64::URL_SAFE_NO_PAD));
+        return compressed_encoded.unwrap_or("".to_owned());
+    }
+}
