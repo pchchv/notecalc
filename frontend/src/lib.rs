@@ -113,13 +113,13 @@ pub fn get_compressed_encoded_content(app_ptr: usize) -> String {
         use flate2::write::ZlibEncoder;
         use flate2::Compression;
         use std::io::prelude::*;
-        
+
         let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
         e.write_all(content.as_bytes()).expect("");
         let compressed_encoded = e
             .finish()
             .map(|it| base64::encode_config(it, base64::URL_SAFE_NO_PAD));
-        
+
         return compressed_encoded.unwrap_or("".to_owned());
     }
 }
@@ -389,4 +389,344 @@ pub fn get_top_of_undo_stack(app_ptr: usize) -> String {
     let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
     let app = bcf.app();
     format!("{:?}", app.editor.undo_stack.last())
+}
+
+fn send_render_commands_to_js(render_buckets: &RenderBuckets, theme: &Theme) {
+    use byteorder::{LittleEndian, WriteBytesExt};
+    use std::io::Cursor;
+
+    const PULSING_RECTANGLE_ID: usize = 100;
+    const CLEAR_PULSING_RECTANGLE_ID: usize = 101;
+
+    let mut js_command_buffer = unsafe { Cursor::new(&mut RENDER_COMMAND_BUFFER[..]) };
+
+    fn write_utf8_text_command(
+        js_command_buffer: &mut Cursor<&mut [u8]>,
+        text: &RenderUtf8TextMsg,
+    ) {
+        js_command_buffer
+            .write_u8(OutputMessageCommandId::RenderUtf8Text as u8 + 1)
+            .expect("");
+
+        js_command_buffer
+            .write_u16::<LittleEndian>(text.row.as_usize() as u16)
+            .expect("");
+        js_command_buffer
+            .write_u16::<LittleEndian>(text.column as u16)
+            .expect("");
+        js_command_buffer
+            .write_u16::<LittleEndian>(text.text.len() as u16)
+            .expect("");
+        for ch in text.text {
+            js_command_buffer
+                .write_u32::<LittleEndian>(*ch as u32)
+                .expect("");
+        }
+    }
+
+    fn write_ascii_text_command(
+        js_command_buffer: &mut Cursor<&mut [u8]>,
+        text: &RenderAsciiTextMsg,
+    ) {
+        js_command_buffer
+            .write_u8(OutputMessageCommandId::RenderAsciiText as u8 + 1)
+            .expect("");
+        js_command_buffer
+            .write_u16::<LittleEndian>(text.row.as_usize() as u16)
+            .expect("");
+        js_command_buffer
+            .write_u16::<LittleEndian>(text.column as u16)
+            .expect("");
+        js_command_buffer
+            .write_u16::<LittleEndian>(text.text.len() as u16)
+            .expect("");
+        for ch in text.text {
+            js_command_buffer.write_u8(*ch).expect("");
+        }
+    }
+
+    fn write_string_command(js_command_buffer: &mut Cursor<&mut [u8]>, text: &RenderStringMsg) {
+        js_command_buffer
+            .write_u8(OutputMessageCommandId::RenderUtf8Text as u8 + 1)
+            .expect("");
+        js_command_buffer
+            .write_u16::<LittleEndian>(text.row.as_usize() as u16)
+            .expect("");
+        js_command_buffer
+            .write_u16::<LittleEndian>(text.column as u16)
+            .expect("");
+        js_command_buffer
+            .write_u16::<LittleEndian>(text.text.chars().count() as u16)
+            .expect("");
+        for ch in text.text.chars() {
+            js_command_buffer
+                .write_u32::<LittleEndian>(ch as u32)
+                .expect("");
+        }
+    }
+
+    fn write_pulse_commands(
+        js_command_buffer: &mut Cursor<&mut [u8]>,
+        pulses: &[PulsingRectangle],
+    ) {
+        js_command_buffer
+            .write_u8(PULSING_RECTANGLE_ID as u8)
+            .expect("");
+        js_command_buffer.write_u8(pulses.len() as u8).expect("");
+        for p in pulses {
+            js_command_buffer.write_u8(p.x as u8).expect("");
+            js_command_buffer.write_u8(p.y.as_usize() as u8).expect("");
+            js_command_buffer.write_u8(p.w as u8).expect("");
+            js_command_buffer.write_u8(p.h as u8).expect("");
+            js_command_buffer
+                .write_u32::<LittleEndian>(p.start_color)
+                .expect("");
+            js_command_buffer
+                .write_u32::<LittleEndian>(p.end_color)
+                .expect("");
+            js_command_buffer
+                .write_u16::<LittleEndian>(p.animation_time.as_millis() as u16)
+                .expect("");
+            js_command_buffer.write_u8(p.repeat as u8).expect("");
+        }
+    }
+
+    fn write_char(js_command_buffer: &mut Cursor<&mut [u8]>, cmd: &RenderChar) {
+        js_command_buffer
+            .write_u8(OutputMessageCommandId::RenderChar as u8 + 1)
+            .expect("");
+        js_command_buffer.write_u8(cmd.col as u8).expect("");
+        js_command_buffer
+            .write_u8(cmd.row.as_usize() as u8)
+            .expect("");
+        js_command_buffer
+            .write_u32::<LittleEndian>(cmd.char as u32)
+            .expect("");
+    }
+
+    fn write_command(js_command_buffer: &mut Cursor<&mut [u8]>, command: &OutputMessage) {
+        match command {
+            OutputMessage::RenderUtf8Text(text) => {
+                write_utf8_text_command(js_command_buffer, text);
+            }
+            OutputMessage::SetStyle(style) => {
+                js_command_buffer
+                    .write_u8(OutputMessageCommandId::SetStyle as u8 + 1)
+                    .expect("");
+                js_command_buffer.write_u8(*style as u8).expect("");
+            }
+            OutputMessage::SetColor(color) => write_color(js_command_buffer, *color),
+            OutputMessage::RenderRectangle { x, y, w, h } => {
+                write_rectangle(js_command_buffer, *x, *y, *w, *h)
+            }
+            OutputMessage::RenderChar(cmd) => {
+                write_char(js_command_buffer, cmd);
+            }
+            OutputMessage::RenderString(text) => {
+                write_string_command(js_command_buffer, text);
+            }
+            OutputMessage::RenderAsciiText(text) => {
+                write_ascii_text_command(js_command_buffer, text);
+            }
+            OutputMessage::FollowingTextCommandsAreHeaders(b) => {
+                js_command_buffer
+                    .write_u8(OutputMessageCommandId::FollowingTextCommandsAreHeaders as u8 + 1)
+                    .expect("");
+                js_command_buffer.write_u8(*b as u8).expect("");
+            }
+            OutputMessage::RenderUnderline { x, y, w } => {
+                js_command_buffer
+                    .write_u8(OutputMessageCommandId::RenderUnderline as u8 + 1)
+                    .expect("");
+                js_command_buffer.write_u8(*x as u8).expect("");
+                js_command_buffer.write_u8(y.as_usize() as u8).expect("");
+                js_command_buffer.write_u8(*w as u8).expect("");
+            }
+            OutputMessage::UpdatePulses => {
+                js_command_buffer
+                    .write_u8(OutputMessageCommandId::UpdatePulses as u8 + 1)
+                    .expect("");
+            }
+        }
+    }
+
+    fn write_color(js_command_buffer: &mut Cursor<&mut [u8]>, color: u32) {
+        js_command_buffer
+            .write_u8(OutputMessageCommandId::SetColor as u8 + 1)
+            .expect("");
+        js_command_buffer
+            .write_u32::<LittleEndian>(color)
+            .expect("");
+    }
+
+    fn write_rectangle(
+        js_command_buffer: &mut Cursor<&mut [u8]>,
+        x: usize,
+        y: CanvasY,
+        w: usize,
+        h: usize,
+    ) {
+        js_command_buffer
+            .write_u8(OutputMessageCommandId::RenderRectangle as u8 + 1)
+            .expect("");
+        js_command_buffer.write_u8(x as u8).expect("");
+        js_command_buffer.write_u8(y.as_usize() as u8).expect("");
+        js_command_buffer.write_u8(w as u8).expect("");
+        js_command_buffer.write_u8(h as u8).expect("");
+    }
+
+    fn write_color_rect(js_command_buffer: &mut Cursor<&mut [u8]>, rect: &Rect, color: u32) {
+        write_color(js_command_buffer, color);
+        write_rectangle(
+            js_command_buffer,
+            rect.x as usize,
+            canvas_y(rect.y as isize),
+            rect.w as usize,
+            rect.h as usize,
+        );
+    }
+
+    fn write_commands(js_command_buffer: &mut Cursor<&mut [u8]>, commands: &[RenderUtf8TextMsg]) {
+        for text in commands {
+            write_utf8_text_command(js_command_buffer, text);
+        }
+    }
+
+    // Current line highlight bg, it is at the most bottom position,
+    // so I can draw rectangles between it and thexts above it
+    write_color_rect(
+        &mut js_command_buffer,
+        &render_buckets.left_gutter_bg,
+        theme.left_gutter_bg,
+    );
+    write_color_rect(
+        &mut js_command_buffer,
+        &render_buckets.right_gutter_bg,
+        theme.result_gutter_bg,
+    );
+    write_color_rect(
+        &mut js_command_buffer,
+        &render_buckets.result_panel_bg,
+        theme.result_bg_color,
+    );
+
+    for command in &render_buckets.custom_commands[Layer::BehindTextBehindCursor as usize] {
+        write_command(&mut js_command_buffer, command);
+    }
+
+    if let Some((color, rect)) = &render_buckets.scroll_bar {
+        write_color_rect(&mut js_command_buffer, rect, *color);
+    }
+
+    for command in &render_buckets.custom_commands[Layer::BehindTextCursor as usize] {
+        write_command(&mut js_command_buffer, command);
+    }
+    for command in &render_buckets.custom_commands[Layer::BehindTextAboveCursor as usize] {
+        write_command(&mut js_command_buffer, command);
+    }
+
+    if render_buckets.clear_pulses {
+        js_command_buffer
+            .write_u8(CLEAR_PULSING_RECTANGLE_ID as u8)
+            .expect("");
+    }
+    if NOT(render_buckets.pulses.is_empty()) {
+        write_pulse_commands(&mut js_command_buffer, &render_buckets.pulses);
+    }
+    write_command(&mut js_command_buffer, &OutputMessage::UpdatePulses);
+
+    for command in &render_buckets.custom_commands[Layer::Text as usize] {
+        write_command(&mut js_command_buffer, command);
+    }
+
+    if !render_buckets.utf8_texts.is_empty() {
+        write_command(&mut js_command_buffer, &OutputMessage::SetColor(theme.text));
+        write_commands(&mut js_command_buffer, &render_buckets.utf8_texts);
+    }
+
+    if !render_buckets.headers.is_empty() {
+        write_command(
+            &mut js_command_buffer,
+            &OutputMessage::FollowingTextCommandsAreHeaders(true),
+        );
+        write_command(
+            &mut js_command_buffer,
+            &OutputMessage::SetColor(theme.header),
+        );
+        write_commands(&mut js_command_buffer, &render_buckets.headers);
+        write_command(
+            &mut js_command_buffer,
+            &OutputMessage::FollowingTextCommandsAreHeaders(false),
+        );
+    }
+
+    if !render_buckets.ascii_texts.is_empty() {
+        write_command(
+            &mut js_command_buffer,
+            &OutputMessage::SetColor(theme.result_text),
+        );
+        for text in &render_buckets.ascii_texts {
+            write_ascii_text_command(&mut js_command_buffer, text);
+        }
+    }
+
+    if !render_buckets.numbers.is_empty() {
+        write_command(
+            &mut js_command_buffer,
+            &OutputMessage::SetColor(theme.number),
+        );
+        write_commands(&mut js_command_buffer, &render_buckets.numbers);
+    }
+    if !render_buckets.number_errors.is_empty() {
+        write_command(
+            &mut js_command_buffer,
+            &OutputMessage::SetColor(theme.number_error),
+        );
+        write_commands(&mut js_command_buffer, &render_buckets.number_errors);
+    }
+
+    if !render_buckets.units.is_empty() {
+        write_command(&mut js_command_buffer, &OutputMessage::SetColor(theme.unit));
+        write_commands(&mut js_command_buffer, &render_buckets.units);
+    }
+
+    if !render_buckets.operators.is_empty() {
+        write_command(
+            &mut js_command_buffer,
+            &OutputMessage::SetColor(theme.operator),
+        );
+        write_commands(&mut js_command_buffer, &render_buckets.operators);
+    }
+    if !render_buckets.parenthesis.is_empty() {
+        write_command(
+            &mut js_command_buffer,
+            &OutputMessage::SetColor(theme.parenthesis),
+        );
+        for cmd in &render_buckets.parenthesis {
+            write_char(&mut js_command_buffer, cmd);
+        }
+    }
+    if !render_buckets.line_ref_results.is_empty() {
+        write_command(
+            &mut js_command_buffer,
+            &OutputMessage::SetColor(theme.line_ref_text),
+        );
+        for command in &render_buckets.line_ref_results {
+            write_string_command(&mut js_command_buffer, command);
+        }
+    }
+
+    if !render_buckets.variable.is_empty() {
+        write_command(
+            &mut js_command_buffer,
+            &OutputMessage::SetColor(theme.variable),
+        );
+        write_commands(&mut js_command_buffer, &render_buckets.variable);
+    }
+
+    for command in &render_buckets.custom_commands[Layer::AboveText as usize] {
+        write_command(&mut js_command_buffer, command);
+    }
+
+    js_command_buffer.write_u8(0).expect("");
 }
