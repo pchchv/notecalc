@@ -1,9 +1,28 @@
+#![deny(
+warnings,
+anonymous_parameters,
+unused_extern_crates,
+unused_import_braces,
+trivial_casts,
+variant_size_differences,
+missing_debug_implementations,
+trivial_numeric_casts,
+unused_qualifications,
+clippy::all
+)]
+#![feature(const_in_array_repeat_expressions)]
+
 use wasm_bindgen::prelude::*;
 
 use crate::utils::set_panic_hook;
 use notecalc::borrow_checker_fighter::{to_box_ptr, BorrowCheckerFighter};
 
 mod utils;
+
+// When the `wee_alloc` feature is enabled, use `wee_alloc` as the global allocator.
+#[cfg(feature = "wee_alloc")]
+#[global_allocator]
+static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
 static mut RENDER_COMMAND_BUFFER: [u8; RENDER_COMMAND_BUFFER_SIZE] =
     [0; RENDER_COMMAND_BUFFER_SIZE];
@@ -45,3 +64,35 @@ pub fn alt_key_released(app_ptr: usize) {
     );
 }
 
+#[wasm_bindgen]
+pub fn handle_resize(app_ptr: usize, new_client_width: usize) {
+    let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
+    bcf.mut_app().handle_resize(
+        new_client_width,
+        bcf.mut_editor_objects(),
+        bcf.units(),
+        bcf.allocator(),
+        bcf.mut_tokens(),
+        bcf.mut_results(),
+        bcf.mut_vars(),
+        bcf.mut_func_defs(),
+        bcf.mut_render_bucket(),
+    );
+}
+
+#[wasm_bindgen]
+pub fn set_theme(app_ptr: usize, theme_index: usize) {
+    let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
+    let app = bcf.mut_app();
+    app.set_theme(
+        theme_index,
+        bcf.mut_editor_objects(),
+        bcf.units(),
+        bcf.allocator(),
+        bcf.mut_tokens(),
+        bcf.mut_results(),
+        bcf.mut_vars(),
+        bcf.mut_func_defs(),
+        bcf.mut_render_bucket(),
+    );
+}
