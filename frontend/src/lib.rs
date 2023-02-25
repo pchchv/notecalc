@@ -16,7 +16,12 @@ use wasm_bindgen::prelude::*;
 
 use crate::utils::set_panic_hook;
 use notecalc::borrow_checker_fighter::{to_box_ptr, BorrowCheckerFighter};
+use notecalc::editor::editor::{EditorInputEvent, InputModifiers};
 use notecalc::helper::*;
+use notecalc::{
+    Layer, OutputMessage, OutputMessageCommandId, RenderAsciiTextMsg, RenderBuckets,
+    RenderStringMsg, RenderUtf8TextMsg,
+};
 
 mod utils;
 
@@ -276,6 +281,54 @@ pub fn handle_paste(app_ptr: usize, input: String) {
         bcf.mut_editor_objects(),
         bcf.mut_render_bucket(),
     );
+}
+
+#[wasm_bindgen]
+pub fn handle_input(app_ptr: usize, input: u32, modifiers: u8) -> bool {
+    let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
+    let modifiers = InputModifiers {
+        shift: modifiers & 1 != 0,
+        ctrl: modifiers & 2 != 0,
+        alt: modifiers & 4 != 0,
+    };
+    let input = match input {
+        1 => EditorInputEvent::Backspace,
+        2 => EditorInputEvent::Enter,
+        3 => EditorInputEvent::Home,
+        4 => EditorInputEvent::End,
+        5 => EditorInputEvent::Up,
+        6 => EditorInputEvent::Down,
+        7 => EditorInputEvent::Left,
+        8 => EditorInputEvent::Right,
+        9 => EditorInputEvent::Del,
+        10 => EditorInputEvent::Esc,
+        11 => EditorInputEvent::PageUp,
+        12 => EditorInputEvent::PageDown,
+        13 => EditorInputEvent::Tab,
+        _ => {
+            let ch = std::char::from_u32(input);
+            if let Some(ch) = ch {
+                EditorInputEvent::Char(ch)
+            } else {
+                return false;
+            }
+        }
+    };
+    let app = bcf.mut_app();
+    let modif = app.handle_input(
+        input,
+        modifiers,
+        bcf.allocator(),
+        bcf.units(),
+        bcf.mut_tokens(),
+        bcf.mut_results(),
+        bcf.mut_vars(),
+        bcf.mut_func_defs(),
+        bcf.mut_editor_objects(),
+        bcf.mut_render_bucket(),
+    );
+
+    return modif.is_some();
 }
 
 // The application has a memory leak, so call this method every N seconds,
