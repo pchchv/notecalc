@@ -19,15 +19,15 @@ flate2 = "^1.0.19"
 base64 = "0.13.0"
 bumpalo = "3.4.0"
 
-# The `console_error_panic_hook` crate provides better debugging of panics by
-# logging them with `console.error`. This is great for development, but requires
-# all the `std::fmt` and `std::panicking` infrastructure, so isn't great for
-# code size when deploying.
+# The `console_error_panic_hook` crate provides better debugging of
+# panics by logging them with `console.error`.
+# This is great for development, but requires the entire
+# `std::fmt` and `std::panicking` infrastructure,
+# which is not good for code size on deployment.
 console_error_panic_hook = { version = "0.1.6", optional = true }
 
-# `wee_alloc` is a tiny allocator for wasm that is only ~1K in code size
-# compared to the default allocator's ~10K. It is slower than the default
-# allocator, however.
-#
-# Unfortunately, `wee_alloc` requires nightly Rust when targeting wasm for now.
+# `wee_alloc` is a tiny allocator for wasm,
+# with a code size of only ~1K compared to ~10K for the default allocator.
+# However, it is slower than the default allocator.
+# Unfortunately, so far `wee_alloc` requires night Rust when working with wasm.
 wee_alloc = { version = "0.4.2", optional = true }
