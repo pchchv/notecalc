@@ -40,6 +40,14 @@ extern "C" {
 }
 
 #[wasm_bindgen]
+pub fn render(app_ptr: usize) {
+    let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
+    let app = bcf.app();
+    let bucket = bcf.mut_render_bucket();
+    send_render_commands_to_js(bucket, &THEMES[app.render_data.theme_index]);
+}
+
+#[wasm_bindgen]
 pub unsafe fn create_app(client_width: usize, client_height: usize) -> usize {
     set_panic_hook();
     js_log(&format!("client_width: {}", client_width));
