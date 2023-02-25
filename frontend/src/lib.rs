@@ -222,3 +222,58 @@ pub fn handle_drag(app_ptr: usize, x: usize, y: usize) -> bool {
     );
 }
 
+#[wasm_bindgen]
+pub fn handle_click(app_ptr: usize, x: usize, y: usize) {
+    let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
+    bcf.mut_app().handle_click(
+        x,
+        CanvasY::new(y as isize),
+        bcf.mut_editor_objects(),
+        bcf.units(),
+        bcf.allocator(),
+        bcf.mut_tokens(),
+        bcf.mut_results(),
+        bcf.mut_vars(),
+        bcf.mut_func_defs(),
+        bcf.mut_render_bucket(),
+    );
+}
+
+#[wasm_bindgen]
+pub fn handle_wheel(app_ptr: usize, dir: usize) -> bool {
+    let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
+    return bcf.mut_app().handle_wheel(
+        dir,
+        bcf.mut_editor_objects(),
+        bcf.units(),
+        bcf.allocator(),
+        bcf.mut_tokens(),
+        bcf.mut_results(),
+        bcf.mut_vars(),
+        bcf.mut_func_defs(),
+        bcf.mut_render_bucket(),
+    );
+}
+
+#[wasm_bindgen]
+pub fn handle_mouse_up(app_ptr: usize) {
+    let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
+    bcf.mut_app().handle_mouse_up();
+}
+
+#[wasm_bindgen]
+pub fn handle_paste(app_ptr: usize, input: String) {
+    let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
+    bcf.mut_app().handle_paste(
+        input,
+        bcf.units(),
+        bcf.allocator(),
+        bcf.mut_tokens(),
+        bcf.mut_results(),
+        bcf.mut_vars(),
+        bcf.mut_func_defs(),
+        bcf.mut_editor_objects(),
+        bcf.mut_render_bucket(),
+    );
+}
+
