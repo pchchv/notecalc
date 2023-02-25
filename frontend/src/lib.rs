@@ -24,6 +24,7 @@ mod utils;
 #[global_allocator]
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
+const RENDER_COMMAND_BUFFER_SIZE: usize = 1024 * 100;
 static mut RENDER_COMMAND_BUFFER: [u8; RENDER_COMMAND_BUFFER_SIZE] =
     [0; RENDER_COMMAND_BUFFER_SIZE];
 
@@ -106,11 +107,46 @@ pub fn get_compressed_encoded_content(app_ptr: usize) -> String {
         use flate2::write::ZlibEncoder;
         use flate2::Compression;
         use std::io::prelude::*;
+        
         let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
         e.write_all(content.as_bytes()).expect("");
         let compressed_encoded = e
             .finish()
             .map(|it| base64::encode_config(it, base64::URL_SAFE_NO_PAD));
+        
         return compressed_encoded.unwrap_or("".to_owned());
+    }
+}
+
+#[wasm_bindgen]
+pub fn set_compressed_encoded_content(app_ptr: usize, compressed_encoded: String) {
+    let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
+    let content = {
+        use flate2::write::ZlibDecoder;
+        use std::io::prelude::*;
+
+        let decoded = base64::decode_config(&compressed_encoded, base64::URL_SAFE_NO_PAD);
+        decoded.ok().and_then(|it| {
+            let mut writer = Vec::with_capacity(compressed_encoded.len() * 2);
+            let mut z = ZlibDecoder::new(writer);
+            z.write_all(&it[..]).expect("");
+            writer = z.finish().unwrap_or(Vec::new());
+            String::from_utf8(writer).ok()
+        })
+    };
+    if let Some(content) = content {
+        let app = bcf.mut_app();
+
+        app.set_normalized_content(
+            &content.trim_end(),
+            bcf.units(),
+            bcf.allocator(),
+            bcf.mut_tokens(),
+            bcf.mut_results(),
+            bcf.mut_vars(),
+            bcf.mut_func_defs(),
+            bcf.mut_editor_objects(),
+            bcf.mut_render_bucket(),
+        );
     }
 }
