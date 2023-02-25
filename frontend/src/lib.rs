@@ -277,3 +277,40 @@ pub fn handle_paste(app_ptr: usize, input: String) {
     );
 }
 
+// The application has a memory leak, so call this method every N seconds,
+// which will clear the allocator, but this is only possible if everything is reparsed and re-rendered after that.
+// The reasons are that Tokens and RenderCommands both refer to the editor's canvas as a slice because of the Rust borrowing check,
+// so we had to allocate them separately, and this separate allocation must be released.
+// But unfortunately, the selections from parsing and rendering are mixed, so it can't just be freed anywhere.
+// Could have freed it in the library, but that would require a mut allocator, and again, Rust's borrowing checker doesn't like that.
+#[wasm_bindgen]
+pub fn reparse_everything(app_ptr: usize) {
+    let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
+    bcf.mut_allocator().reset();
+    let app = bcf.mut_app();
+
+    app.reparse_everything(
+        bcf.allocator(),
+        bcf.units(),
+        bcf.mut_tokens(),
+        bcf.mut_results(),
+        bcf.mut_vars(),
+        bcf.mut_func_defs(),
+        bcf.mut_editor_objects(),
+        bcf.mut_render_bucket(),
+    );
+}
+
+#[wasm_bindgen]
+pub fn get_selected_rows_with_results(app_ptr: usize) -> String {
+    let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
+    let app = bcf.mut_app();
+    let units = bcf.units();
+    return app.copy_selected_rows_with_result_to_clipboard(
+        units,
+        bcf.mut_render_bucket(),
+        bcf.mut_tokens(),
+        bcf.mut_vars(),
+        bcf.mut_results(),
+    );
+}
