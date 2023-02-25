@@ -16,6 +16,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::utils::set_panic_hook;
 use notecalc::borrow_checker_fighter::{to_box_ptr, BorrowCheckerFighter};
+use notecalc::helper::*;
 
 mod utils;
 
@@ -313,4 +314,26 @@ pub fn get_selected_rows_with_results(app_ptr: usize) -> String {
         bcf.mut_vars(),
         bcf.mut_results(),
     );
+}
+
+#[wasm_bindgen]
+pub fn get_plain_content(app_ptr: usize) -> String {
+    let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
+    let app = bcf.app();
+    app.editor_content.get_content()
+}
+
+#[wasm_bindgen]
+pub fn get_cursor(app_ptr: usize) -> String {
+    let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
+    let app = bcf.app();
+    let sel = app.editor.get_selection();
+    format!("{:?}", sel)
+}
+
+#[wasm_bindgen]
+pub fn get_top_of_undo_stack(app_ptr: usize) -> String {
+    let bcf = BorrowCheckerFighter::from_ptr(app_ptr);
+    let app = bcf.app();
+    format!("{:?}", app.editor.undo_stack.last())
 }
