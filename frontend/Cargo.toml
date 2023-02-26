@@ -1,6 +1,7 @@
 [package]
 name = "frontend"
 version = "0.1.0"
+authors = ["pchchv <ipchchv@gmail.com>"]
 edition = "2021"
 
 [lib]
